@@ -72,7 +72,7 @@ async function loadState() {
     "douyinAutoCapture"
   ]);
   countEl.textContent = String(douyinUsers.length);
-  shotsEl.textContent = String(Object.values(douyinScreenshots).filter((shot) => shot?.profileKey).length);
+  shotsEl.textContent = String(Object.keys(douyinScreenshots).length);
   if (douyinAutoCapture?.running) {
     setStatus(`正在仅补缺失截图：${douyinAutoCapture.done || 0}/${douyinAutoCapture.total || 0}，已跳过已有截图 ${douyinAutoCapture.skippedExistingCount || 0} 个，当前：${douyinAutoCapture.currentName || "-"}`);
     return;

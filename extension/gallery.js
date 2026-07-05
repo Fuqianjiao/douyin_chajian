@@ -9,6 +9,8 @@ const categories = [
 
 const MAX_TAGS = 5;
 const SELF_PROFILE_NAMES = ["新时代霹雳娇羊"];
+const INITIAL_VISIBLE_LIMIT = 60;
+const LOAD_MORE_STEP = 60;
 
 const foldersEl = document.querySelector("#folders");
 const contentEl = document.querySelector("#content");
@@ -93,6 +95,7 @@ let renderQueued = false;
 let confirmResolver = null;
 let screenshotsLoaded = false;
 let screenshotLoadToken = 0;
+let visibleLimit = INITIAL_VISIBLE_LIMIT;
 
 function escapeHtml(value = "") {
   return String(value)
@@ -416,6 +419,10 @@ function pruneSelectedKeys(users) {
 
 function setBatchHint(message = "") {
   batchHintEl.textContent = message;
+}
+
+function resetVisibleLimit() {
+  visibleLimit = INITIAL_VISIBLE_LIMIT;
 }
 
 function renderBatchControls(users, visibleUsers) {
@@ -793,15 +800,22 @@ function renderView(users, screenshots, options = {}) {
   `).join("");
 
   const visibleUsers = filteredUsers(users, screenshots);
+  const renderedUsers = visibleUsers.slice(0, visibleLimit);
+  const hasMore = visibleUsers.length > renderedUsers.length;
   renderBatchControls(users, visibleUsers);
   const title = activeTag === "all" ? "全部账号" : activeTag;
   contentEl.innerHTML = `
     <section class="folder">
       <div class="folder-head">
         <h2>${escapeHtml(title)}</h2>
-        <p>${visibleUsers.length} 个账号</p>
+        <p>${renderedUsers.length}/${visibleUsers.length} 个账号</p>
       </div>
-      ${renderCards(visibleUsers, screenshots)}
+      ${renderCards(renderedUsers, screenshots)}
+      ${hasMore ? `
+        <div class="load-more-wrap">
+          <button id="loadMoreCards" class="load-more" type="button">加载更多 ${Math.min(LOAD_MORE_STEP, visibleUsers.length - renderedUsers.length)} 个</button>
+        </div>
+      ` : ""}
     </section>
   `;
 }
@@ -1307,6 +1321,7 @@ tagSuggestionsEl.addEventListener("mousedown", (event) => {
 });
 nameSearchEl.addEventListener("input", () => {
   nameQuery = nameSearchEl.value;
+  resetVisibleLimit();
   render();
 });
 toggleAdvancedButton.addEventListener("click", () => {
@@ -1320,11 +1335,13 @@ applyFiltersButton.addEventListener("click", () => {
     note: noteFilterEl.value,
     noteText: noteSearchEl.value
   };
+  resetVisibleLimit();
   render();
 });
 resetFiltersButton.addEventListener("click", () => {
   activeTag = "all";
   nameQuery = "";
+  resetVisibleLimit();
   advancedFilters = {
     tag: "",
     screenshot: "",
@@ -1372,9 +1389,15 @@ foldersEl.addEventListener("click", (event) => {
   const tag = event.target.closest("[data-tag]")?.dataset?.tag;
   if (!tag) return;
   activeTag = tag;
+  resetVisibleLimit();
   render();
 });
 contentEl.addEventListener("click", (event) => {
+  if (event.target.closest("#loadMoreCards")) {
+    visibleLimit += LOAD_MORE_STEP;
+    render();
+    return;
+  }
   const deleteKey = event.target.closest("[data-delete]")?.dataset?.delete;
   if (deleteKey) {
     confirmDeleteUser(deleteKey);
@@ -1383,6 +1406,7 @@ contentEl.addEventListener("click", (event) => {
   const tag = event.target.closest("[data-tag]")?.dataset?.tag;
   if (tag) {
     activeTag = tag;
+    resetVisibleLimit();
     render();
     return;
   }
