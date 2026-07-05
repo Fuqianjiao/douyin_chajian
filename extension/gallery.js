@@ -309,6 +309,23 @@ function repairLegacyScreenshots(users = [], screenshots = {}) {
   return { users: nextUsers, screenshots: nextScreenshots };
 }
 
+function screenshotsMetaChanged(prev = {}, next = {}) {
+  const prevKeys = Object.keys(prev);
+  const nextKeys = Object.keys(next);
+  if (prevKeys.length !== nextKeys.length) return true;
+  for (const key of nextKeys) {
+    const before = prev[key] || {};
+    const after = next[key] || {};
+    if (!prev[key]
+      || before.profileKey !== after.profileKey
+      || normalizeUrl(before.normalizedUrl || before.url || "") !== normalizeUrl(after.normalizedUrl || after.url || "")
+      || before.name !== after.name) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function migrateUsersAndScreenshots(users = [], screenshots = {}) {
   const nextScreenshots = { ...screenshots };
   const nextUsers = users.filter((user) => !isSelfUser(user)).map((user) => {
@@ -797,7 +814,7 @@ async function loadScreenshotsDeferred(usersSnapshot, token) {
   if (JSON.stringify(migrated.users) !== JSON.stringify(usersSnapshot)) {
     patch.douyinUsers = migrated.users;
   }
-  if (JSON.stringify(migrated.screenshots) !== JSON.stringify(douyinScreenshots)) {
+  if (screenshotsMetaChanged(douyinScreenshots, migrated.screenshots)) {
     patch.douyinScreenshots = migrated.screenshots;
   }
   if (Object.keys(patch).length) {
@@ -834,7 +851,7 @@ async function render(options = {}) {
   const users = migrated.users;
   const screenshots = migrated.screenshots;
   const changed = JSON.stringify(users) !== JSON.stringify(douyinUsers)
-    || JSON.stringify(screenshots) !== JSON.stringify(douyinScreenshots);
+    || screenshotsMetaChanged(douyinScreenshots, screenshots);
   if (changed) {
     await chrome.storage.local.set({
       douyinUsers: users,
@@ -1397,10 +1414,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
         applySavedScreenshot({ profileKey, screenshot });
       }
     }
-    screenshotLoadToken += 1;
-    screenshotsLoaded = true;
-    const migrated = migrateUsersAndScreenshots(currentRenderData.users, newScreenshots);
-    renderView(migrated.users, migrated.screenshots);
+    const token = screenshotLoadToken + 1;
+    screenshotLoadToken = token;
+    loadScreenshotsDeferred(currentRenderData.users, token).catch(() => {
+      if (token === screenshotLoadToken) {
+        screenshotsLoaded = true;
+        metaEl.textContent = `本地已采集 ${currentRenderData.users.length} 个账号，截图缓存加载失败。`;
+      }
+    });
   }
   if (areaName === "local" && changes.douyinAutoCapture) {
     updateAutoCaptureStatus(changes.douyinAutoCapture.newValue, { showIdleToast: true });
@@ -1419,4 +1440,6 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-render().then(refreshAutoCaptureStatus);
+render({ deferScreenshots: true }).then(refreshAutoCaptureStatus).catch((error) => {
+  metaEl.textContent = `读取本地采集数据失败：${error?.message || String(error)}`;
+});
