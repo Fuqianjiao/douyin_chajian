@@ -1,0 +1,22 @@
+{
+  "name": "douyin-learning-board",
+  "version": "0.1.0",
+  "description": "Fetch followed Douyin accounts with local cookies, cache profile screenshots, and build an offline learning gallery.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "抖音起号学习看板",
+    "shortDescription": "本地抓取抖音关注列表并生成离线学习画廊。",
+    "longDescription": "通过本机浏览器登录态抓取抖音关注列表，缓存主播主页截图，并按内容方向生成智能文件夹画廊，便于起号学习和对标分析。",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "local-browser-automation",
+      "offline-gallery"
+    ],
+    "defaultPrompt": "帮我使用抖音起号学习看板抓取关注列表、分类并生成离线画廊。"
+  },
+  "apps": "./.app.json"
+}

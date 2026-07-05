@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "抖音起号学习看板",
+  "version": "0.1.49",
+  "description": "本地采集抖音关注列表，按方向分类，并生成离线学习画廊。",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs",
+    "unlimitedStorage",
+    "<all_urls>"
+  ],
+  "host_permissions": [
+    "https://www.douyin.com/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "抖音起号学习看板",
+    "default_popup": "extension/popup.html"
+  },
+  "background": {
+    "service_worker": "extension/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.douyin.com/*"
+      ],
+      "js": [
+        "extension/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
