@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音起号学习看板",
-  "version": "0.1.59",
+  "version": "0.1.60",
   "description": "本地采集抖音关注列表，按方向分类，并生成离线学习画廊。",
   "permissions": [
     "activeTab",

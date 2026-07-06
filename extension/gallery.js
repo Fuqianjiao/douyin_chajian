@@ -12,7 +12,7 @@ const SELF_PROFILE_NAMES = ["新时代霹雳娇羊"];
 const INITIAL_VISIBLE_LIMIT = 60;
 const LOAD_MORE_STEP = 60;
 // 截图虚拟化：按视口批量加载，防止 Chrome 内存爆裂
-const MAX_ACTIVE_SHOT_IMAGES = 30;  // 约 1.5 屏的量
+const MAX_ACTIVE_SHOT_IMAGES = 15;  // 约 1 屏的量（5列×3行）
 
 const foldersEl = document.querySelector("#folders");
 const contentEl = document.querySelector("#content");
@@ -642,11 +642,22 @@ function pruneActiveShots(keepEl = null) {
   }
 }
 
-/** 批量渲染当前视口内所有截图（一屏一起出） */
+/** 只渲染视口内的截图（用 getBoundingClientRect 精确判断） */
 function hydrateVisibleShots() {
+  const viewTop = -window.innerHeight * 0.5;   // 上方半屏缓冲
+  const viewBottom = window.innerHeight * 1.5; // 下方 1.5 屏缓冲
   const shots = Array.from(contentEl.querySelectorAll(".shot.has-shot[data-shot-key]"));
+  let loaded = 0;
   for (const el of shots) {
+    // 跳过已加载的
+    if (el.dataset.loaded === "1") continue;
+    // 跳过超出可视范围的
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom < viewTop || rect.top > viewBottom) continue;
+    // 达到上限就停
+    if (loaded >= MAX_ACTIVE_SHOT_IMAGES) break;
     hydrateShotImage(el);
+    loaded++;
   }
   pruneActiveShots();
 }
@@ -670,18 +681,17 @@ function onScroll() {
 
 function setupShotLazyLoading() {
   teardownShotLazyLoading();
-  const allShots = Array.from(contentEl.querySelectorAll(".shot.has-shot[data-shot-key]"));
+  const allShots = contentEl.querySelectorAll(".shot.has-shot[data-shot-key]");
   if (!allShots.length) return;
 
-  // ① 首屏立即批量加载
+  // ① 首屏只加载可见区域（不是全部）
   hydrateVisibleShots();
 
-  // ② 滚动时按帧批量加载新进入的卡片
+  // ② 滚动时按帧加载新进入的卡片
   window.addEventListener("scroll", onScroll, { passive: true });
 
-  // ③ 用 IntersectionObserver 做粗粒度触发：只要视口附近有任何卡片就批量刷新
+  // ③ 用 IntersectionObserver 做粗粒度触发
   if ("IntersectionObserver" in window) {
-    // 用一个哨兵元素检测是否需要加载新区块
     const sentinel = document.createElement("div");
     sentinel.style.cssText = "position:absolute;height:1px;width:1px;pointer-events:none;bottom:0;";
     contentEl.closest("section")?.appendChild(sentinel);
@@ -694,7 +704,7 @@ function setupShotLazyLoading() {
       }
     }, {
       root: null,
-      rootMargin: `${window.innerHeight}px 0px`,   // 上下各扩展一屏
+      rootMargin: `${window.innerHeight}px 0px`,
       threshold: 0
     });
     shotObserver.observe(sentinel);
