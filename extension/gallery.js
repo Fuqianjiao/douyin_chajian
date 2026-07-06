@@ -11,8 +11,8 @@ const MAX_TAGS = 5;
 const SELF_PROFILE_NAMES = ["新时代霹雳娇羊"];
 const INITIAL_VISIBLE_LIMIT = 60;
 const LOAD_MORE_STEP = 60;
-// 截图虚拟化：同时最多渲染 N 张实际图片，防止 Chrome 内存爆裂
-const MAX_ACTIVE_SHOT_IMAGES = 12;
+// 截图虚拟化：按视口批量加载，防止 Chrome 内存爆裂
+const MAX_ACTIVE_SHOT_IMAGES = 30;  // 约 1.5 屏的量
 
 const foldersEl = document.querySelector("#folders");
 const contentEl = document.querySelector("#content");
@@ -600,7 +600,7 @@ function renderCards(users, screenshots) {
   `;
 }
 
-// ─── 截图虚拟化：IntersectionObserver 按需加载，最多保持 N 张活跃图片 ───
+// ─── 截图虚拟化：按整屏批量加载，防止内存爆炸 ───
 
 function userByProfileKey(key = "") {
   return currentRenderData.users.find((u) => profileKeyForUser(u) === key) || null;
@@ -629,49 +629,76 @@ function hydrateShotImage(shotEl) {
 
   shotEl.dataset.loaded = "1";
   shotEl.innerHTML = `<img src="${shotSrc}" alt="${escapeHtml(user?.name || "博主")} 的主页截图" loading="eager" decoding="async">`;
-  activeShotKeys = activeShotKeys.filter((k) => k !== key);
-  activeShotKeys.push(key);
+  if (!activeShotKeys.includes(key)) activeShotKeys.push(key);
+}
 
-  // 超出上限时卸载最老的截图
+/** 卸载超出上限的最老截图 */
+function pruneActiveShots(keepEl = null) {
   while (activeShotKeys.length > MAX_ACTIVE_SHOT_IMAGES) {
     const staleKey = activeShotKeys.shift();
-    const staleShot = staleKey ? contentEl.querySelector(`.shot[data-shot-key="${cssEscape(staleKey)}"]`) : null;
-    if (staleShot && staleShot !== shotEl) unloadShotImage(staleShot);
+    if (!staleKey) continue;
+    const staleShot = contentEl.querySelector(`.shot[data-shot-key="${cssEscape(staleKey)}"]`);
+    if (staleShot && staleShot !== keepEl) unloadShotImage(staleShot);
   }
+}
+
+/** 批量渲染当前视口内所有截图（一屏一起出） */
+function hydrateVisibleShots() {
+  const shots = Array.from(contentEl.querySelectorAll(".shot.has-shot[data-shot-key]"));
+  for (const el of shots) {
+    hydrateShotImage(el);
+  }
+  pruneActiveShots();
 }
 
 function teardownShotLazyLoading() {
   if (shotObserver) { shotObserver.disconnect(); shotObserver = null; }
+  if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = null; }
+  window.removeEventListener("scroll", onScroll, { passive: true });
   activeShotKeys = [];
+}
+
+let scrollRaf = null;
+
+function onScroll() {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = null;
+    hydrateVisibleShots();
+  });
 }
 
 function setupShotLazyLoading() {
   teardownShotLazyLoading();
-  const shots = Array.from(contentEl.querySelectorAll(".shot.has-shot[data-shot-key]"));
-  if (!shots.length) return;
+  const allShots = Array.from(contentEl.querySelectorAll(".shot.has-shot[data-shot-key]"));
+  if (!allShots.length) return;
 
-  // 不支持 IntersectionObserver 时直接加载前 N 张
-  if (!("IntersectionObserver" in window)) {
-    shots.slice(0, MAX_ACTIVE_SHOT_IMAGES).forEach(hydrateShotImage);
-    return;
-  }
+  // ① 首屏立即批量加载
+  hydrateVisibleShots();
 
-  shotObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      const el = entry.target;
-      if (entry.isIntersecting) {
-        hydrateShotImage(el);
-      } else {
-        unloadShotImage(el);
+  // ② 滚动时按帧批量加载新进入的卡片
+  window.addEventListener("scroll", onScroll, { passive: true });
+
+  // ③ 用 IntersectionObserver 做粗粒度触发：只要视口附近有任何卡片就批量刷新
+  if ("IntersectionObserver" in window) {
+    // 用一个哨兵元素检测是否需要加载新区块
+    const sentinel = document.createElement("div");
+    sentinel.style.cssText = "position:absolute;height:1px;width:1px;pointer-events:none;bottom:0;";
+    contentEl.closest("section")?.appendChild(sentinel);
+
+    shotObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          requestAnimationFrame(hydrateVisibleShots);
+        }
       }
-    }
-  }, {
-    root: null,
-    rootMargin: "360px 0px",   // 提前 360px 开始加载
-    threshold: 0.01
-  });
-
-  shots.forEach((shot) => shotObserver.observe(shot));
+    }, {
+      root: null,
+      rootMargin: `${window.innerHeight}px 0px`,   // 上下各扩展一屏
+      threshold: 0
+    });
+    shotObserver.observe(sentinel);
+  }
 }
 
 function findCardByKey(key) {
