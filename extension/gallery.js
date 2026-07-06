@@ -11,6 +11,8 @@ const MAX_TAGS = 5;
 const SELF_PROFILE_NAMES = ["新时代霹雳娇羊"];
 const INITIAL_VISIBLE_LIMIT = 60;
 const LOAD_MORE_STEP = 60;
+// 截图虚拟化：同时最多渲染 N 张实际图片，防止 Chrome 内存爆裂
+const MAX_ACTIVE_SHOT_IMAGES = 12;
 
 const foldersEl = document.querySelector("#folders");
 const contentEl = document.querySelector("#content");
@@ -96,6 +98,10 @@ let confirmResolver = null;
 let screenshotsLoaded = false;
 let screenshotLoadToken = 0;
 let visibleLimit = INITIAL_VISIBLE_LIMIT;
+
+// 截图虚拟化状态
+let activeShotKeys = [];
+let shotObserver = null;
 
 function escapeHtml(value = "") {
   return String(value)
@@ -555,10 +561,11 @@ function renderCards(users, screenshots) {
       ${users.map((user) => {
         const shot = screenshotFor(user, screenshots);
         const shotSrc = screenshotDataUrl(shot);
-        const shotInner = shotSrc
-          ? `<img src="${shotSrc}" alt="${escapeHtml(user.name)} 的主页截图" loading="lazy" decoding="async">`
-          : "暂无截图";
         const key = profileKeyForUser(user);
+        // 不直接渲染 <img>，用占位符 + IntersectionObserver 按需加载，防止内存爆炸
+        const shotInner = shotSrc
+          ? '<span class="shot-placeholder">截图待加载</span>'
+          : "暂无截图";
         const selected = selectedKeys.has(key);
         return `
           <article class="card ${batchMode ? "batch-mode" : ""} ${selected ? "batch-selected" : ""}" data-key="${escapeHtml(key)}">
@@ -570,8 +577,8 @@ function renderCards(users, screenshots) {
               </label>
             ` : ""}
             ${user.url
-              ? `<a class="shot" href="${escapeHtml(user.url)}" target="_blank" rel="noreferrer">${shotInner}</a>`
-              : `<div class="shot">${shotInner}</div>`}
+              ? `<a class="shot ${shotSrc ? "has-shot" : ""}" data-shot-key="${escapeHtml(key)}" href="${escapeHtml(user.url)}" target="_blank" rel="noreferrer">${shotInner}</a>`
+              : `<div class="shot ${shotSrc ? "has-shot" : ""}" data-shot-key="${escapeHtml(key)}">${shotInner}</div>`}
             <div class="body">
               <div class="profile">
                 ${user.avatar ? `<img src="${escapeHtml(user.avatar)}" alt="">` : `<span class="avatar">${escapeHtml((user.name || "?").slice(0, 1))}</span>`}
@@ -591,6 +598,80 @@ function renderCards(users, screenshots) {
       }).join("")}
     </div>
   `;
+}
+
+// ─── 截图虚拟化：IntersectionObserver 按需加载，最多保持 N 张活跃图片 ───
+
+function userByProfileKey(key = "") {
+  return currentRenderData.users.find((u) => profileKeyForUser(u) === key) || null;
+}
+
+function cssEscape(value = "") {
+  if (window.CSS?.escape) return window.CSS.escape(value);
+  return String(value).replaceAll(/["\\]/g, "\\$&");
+}
+
+function unloadShotImage(shotEl) {
+  if (!shotEl || shotEl.dataset.loaded !== "1") return;
+  shotEl.dataset.loaded = "";
+  shotEl.innerHTML = '<span class="shot-placeholder">截图待加载</span>';
+  activeShotKeys = activeShotKeys.filter((k) => k !== shotEl.dataset.shotKey);
+}
+
+function hydrateShotImage(shotEl) {
+  if (!shotEl || shotEl.dataset.loaded === "1") return;
+  const key = shotEl.dataset.shotKey || "";
+  const user = userByProfileKey(key);
+  const shotSrc = screenshotDataUrl(
+    user ? screenshotFor(user, currentRenderData.screenshots) : currentRenderData.screenshots[key]
+  );
+  if (!shotSrc) return;
+
+  shotEl.dataset.loaded = "1";
+  shotEl.innerHTML = `<img src="${shotSrc}" alt="${escapeHtml(user?.name || "博主")} 的主页截图" loading="eager" decoding="async">`;
+  activeShotKeys = activeShotKeys.filter((k) => k !== key);
+  activeShotKeys.push(key);
+
+  // 超出上限时卸载最老的截图
+  while (activeShotKeys.length > MAX_ACTIVE_SHOT_IMAGES) {
+    const staleKey = activeShotKeys.shift();
+    const staleShot = staleKey ? contentEl.querySelector(`.shot[data-shot-key="${cssEscape(staleKey)}"]`) : null;
+    if (staleShot && staleShot !== shotEl) unloadShotImage(staleShot);
+  }
+}
+
+function teardownShotLazyLoading() {
+  if (shotObserver) { shotObserver.disconnect(); shotObserver = null; }
+  activeShotKeys = [];
+}
+
+function setupShotLazyLoading() {
+  teardownShotLazyLoading();
+  const shots = Array.from(contentEl.querySelectorAll(".shot.has-shot[data-shot-key]"));
+  if (!shots.length) return;
+
+  // 不支持 IntersectionObserver 时直接加载前 N 张
+  if (!("IntersectionObserver" in window)) {
+    shots.slice(0, MAX_ACTIVE_SHOT_IMAGES).forEach(hydrateShotImage);
+    return;
+  }
+
+  shotObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const el = entry.target;
+      if (entry.isIntersecting) {
+        hydrateShotImage(el);
+      } else {
+        unloadShotImage(el);
+      }
+    }
+  }, {
+    root: null,
+    rootMargin: "360px 0px",   // 提前 360px 开始加载
+    threshold: 0.01
+  });
+
+  shots.forEach((shot) => shotObserver.observe(shot));
 }
 
 function findCardByKey(key) {
@@ -835,6 +916,11 @@ function renderView(users, screenshots, options = {}) {
       ` : ""}
     </section>
   `;
+
+  // 截图虚拟化：用 IntersectionObserver 按需加载实际图片
+  if (!options.loadingScreenshots) {
+    requestAnimationFrame(() => setupShotLazyLoading());
+  }
 }
 
 async function loadScreenshotsDeferred(usersSnapshot, token) {
