@@ -1166,7 +1166,9 @@ function closeEditor() {
 
 function addDraftTag(inputTag = "") {
   const user = currentEditingUser();
-  const tag = normalizeTag(inputTag || tagInput.value);
+  // 忽略事件对象：click 事件会将 event 作为第一个参数传入
+  const raw = (inputTag && typeof inputTag === "string") ? inputTag : tagInput.value;
+  const tag = normalizeTag(raw);
   if (!user || !tag) return;
   if (hasTag(draftAiTags, tag) || hasTag(draftUserTags, tag)) {
     tagHint.textContent = "这个标签已经存在。";
