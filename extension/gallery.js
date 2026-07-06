@@ -227,6 +227,16 @@ function screenshotFor(user, screenshots) {
   };
 }
 
+function screenshotDataUrl(screenshot = {}) {
+  const shot = screenshot || {};
+  return shot.dataUrl
+    || shot.imageDataUrl
+    || shot.screenshotDataUrl
+    || shot.image
+    || shot.src
+    || "";
+}
+
 function sameScreenshotProfile(user, screenshot = {}, key = "") {
   const userUrl = normalizeUrl(user.url || "");
   const shotUrl = normalizeUrl(screenshot.normalizedUrl || screenshot.url || "");
@@ -245,12 +255,12 @@ function findScreenshotForUser(user, screenshots = {}) {
   const directKeys = unique([expectedKey, user.screenshotKey, user.screenshotUrl]);
   for (const key of directKeys) {
     const shot = screenshots[key];
-    if (shot?.dataUrl) {
+    if (screenshotDataUrl(shot)) {
       return shot;
     }
   }
   return Object.entries(screenshots).find(([key, shot]) => {
-    return shot?.dataUrl && sameScreenshotProfile({ ...user, profileKey: expectedKey }, shot, key);
+    return screenshotDataUrl(shot) && sameScreenshotProfile({ ...user, profileKey: expectedKey }, shot, key);
   })?.[1] || null;
 }
 
@@ -258,24 +268,25 @@ function screenshotIdentity(screenshot = {}) {
   return screenshot.profileKey
     || normalizeUrl(screenshot.normalizedUrl || screenshot.url || "")
     || screenshot.name
-    || screenshot.dataUrl?.slice(0, 80)
+    || screenshotDataUrl(screenshot).slice(0, 80)
     || "";
 }
 
 function repairLegacyScreenshots(users = [], screenshots = {}) {
   const nextScreenshots = { ...screenshots };
-  const legacyShots = Object.values(nextScreenshots).filter((shot) => shot?.dataUrl);
+  const legacyShots = Object.values(nextScreenshots).filter((shot) => screenshotDataUrl(shot));
   if (!legacyShots.length) return { users, screenshots: nextScreenshots };
 
   const used = new Set();
   for (const user of users) {
     const profileKey = profileKeyForUser(user);
     const shot = findScreenshotForUser(user, nextScreenshots);
-    if (shot?.dataUrl) {
+    if (screenshotDataUrl(shot)) {
       used.add(screenshotIdentity(shot));
       if (profileKey) {
         nextScreenshots[profileKey] = {
           ...shot,
+          dataUrl: screenshotDataUrl(shot),
           profileKey,
           url: shot.url || user.url || "",
           normalizedUrl: normalizeUrl(shot.normalizedUrl || shot.url || user.url || ""),
@@ -291,10 +302,11 @@ function repairLegacyScreenshots(users = [], screenshots = {}) {
     const profileKey = profileKeyForUser(user);
     if (!profileKey || findScreenshotForUser(user, nextScreenshots)) return user;
     const shot = availableShots[cursor];
-    if (!shot?.dataUrl) return user;
+    if (!screenshotDataUrl(shot)) return user;
     cursor += 1;
     nextScreenshots[profileKey] = {
       ...shot,
+      dataUrl: screenshotDataUrl(shot),
       profileKey,
       url: shot.url || user.url || "",
       normalizedUrl: normalizeUrl(shot.normalizedUrl || shot.url || user.url || ""),
@@ -342,9 +354,10 @@ function migrateUsersAndScreenshots(users = [], screenshots = {}) {
     const notes = notesFor(user);
 
     const strictShot = findScreenshotForUser({ ...user, url, profileKey }, nextScreenshots);
-    if (strictShot?.dataUrl) {
+    if (screenshotDataUrl(strictShot)) {
       nextScreenshots[profileKey] = {
         ...strictShot,
+        dataUrl: screenshotDataUrl(strictShot),
         profileKey,
         url: strictShot.url || url,
         normalizedUrl: normalizeUrl(strictShot.url || url),
@@ -541,8 +554,9 @@ function renderCards(users, screenshots) {
     <div class="gallery">
       ${users.map((user) => {
         const shot = screenshotFor(user, screenshots);
-        const shotInner = shot
-          ? `<img src="${shot.dataUrl}" alt="${escapeHtml(user.name)} 的主页截图" loading="lazy" decoding="async">`
+        const shotSrc = screenshotDataUrl(shot);
+        const shotInner = shotSrc
+          ? `<img src="${shotSrc}" alt="${escapeHtml(user.name)} 的主页截图" loading="lazy" decoding="async">`
           : "暂无截图";
         const key = profileKeyForUser(user);
         const selected = selectedKeys.has(key);
@@ -587,23 +601,26 @@ function replaceCardScreenshot(user, screenshot) {
   const key = profileKeyForUser(user);
   const card = findCardByKey(key);
   const shotEl = card?.querySelector(".shot");
-  if (!shotEl || !screenshot?.dataUrl) return;
-  shotEl.innerHTML = `<img src="${screenshot.dataUrl}" alt="${escapeHtml(user.name || "博主")} 的主页截图" loading="eager" decoding="async">`;
+  const shotSrc = screenshotDataUrl(screenshot);
+  if (!shotEl || !shotSrc) return;
+  shotEl.innerHTML = `<img src="${shotSrc}" alt="${escapeHtml(user.name || "博主")} 的主页截图" loading="eager" decoding="async">`;
 }
 
 function applySavedScreenshot(payload = {}) {
   const screenshot = payload.screenshot || {};
+  const shotSrc = screenshotDataUrl(screenshot);
   const payloadUser = payload.user || {};
   const profileKey = payload.profileKey
     || screenshot.profileKey
     || profileKeyForUser(payloadUser)
     || profileKeyForUser({ url: screenshot.url || screenshot.normalizedUrl || "", name: screenshot.name || "" });
-  if (!profileKey || !screenshot.dataUrl) return;
+  if (!profileKey || !shotSrc) return;
 
   screenshotLoadToken += 1;
   screenshotsLoaded = true;
   const nextScreenshot = {
     ...screenshot,
+    dataUrl: shotSrc,
     profileKey,
     screenshotKey: profileKey,
     screenshotUrl: profileKey,
@@ -824,6 +841,9 @@ async function loadScreenshotsDeferred(usersSnapshot, token) {
   const { douyinScreenshots = {} } = await chrome.storage.local.get("douyinScreenshots");
   if (token !== screenshotLoadToken) return;
   const migrated = migrateUsersAndScreenshots(usersSnapshot, douyinScreenshots);
+  screenshotsLoaded = true;
+  renderView(migrated.users, migrated.screenshots);
+
   const patch = {};
   if (JSON.stringify(migrated.users) !== JSON.stringify(usersSnapshot)) {
     patch.douyinUsers = migrated.users;
@@ -832,10 +852,12 @@ async function loadScreenshotsDeferred(usersSnapshot, token) {
     patch.douyinScreenshots = migrated.screenshots;
   }
   if (Object.keys(patch).length) {
-    await chrome.storage.local.set(patch);
+    chrome.storage.local.set(patch).catch((error) => {
+      if (token === screenshotLoadToken) {
+        captureStatusEl.textContent = `截图已恢复展示，但写回本地缓存失败：${error?.message || error}`;
+      }
+    });
   }
-  screenshotsLoaded = true;
-  renderView(migrated.users, migrated.screenshots);
 }
 
 async function render(options = {}) {
@@ -866,15 +888,17 @@ async function render(options = {}) {
   const screenshots = migrated.screenshots;
   const changed = JSON.stringify(users) !== JSON.stringify(douyinUsers)
     || screenshotsMetaChanged(douyinScreenshots, screenshots);
-  if (changed) {
-    await chrome.storage.local.set({
-      douyinUsers: users,
-      douyinScreenshots: screenshots
-    });
-  }
-
   screenshotsLoaded = true;
   renderView(users, screenshots);
+
+  if (changed) {
+    chrome.storage.local.set({
+      douyinUsers: users,
+      douyinScreenshots: screenshots
+    }).catch((error) => {
+      captureStatusEl.textContent = `截图已恢复展示，但写回本地缓存失败：${error?.message || error}`;
+    });
+  }
 }
 
 function scheduleRender(delay = 500) {
@@ -1431,7 +1455,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     const oldScreenshots = changes.douyinScreenshots.oldValue || {};
     const newScreenshots = changes.douyinScreenshots.newValue || {};
     const changedShots = Object.entries(newScreenshots)
-      .filter(([key, shot]) => shot?.dataUrl && oldScreenshots[key]?.dataUrl !== shot.dataUrl)
+      .filter(([key, shot]) => {
+        const nextSrc = screenshotDataUrl(shot);
+        return nextSrc && screenshotDataUrl(oldScreenshots[key]) !== nextSrc;
+      })
       .slice(0, 8);
     if (changedShots.length) {
       for (const [profileKey, screenshot] of changedShots) {
