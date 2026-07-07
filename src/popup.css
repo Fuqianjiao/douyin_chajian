@@ -107,7 +107,7 @@ progress {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
   margin-top: 16px;
 }
@@ -123,12 +123,10 @@ progress {
 .stat-card strong {
   display: block;
   margin-bottom: 6px;
-  font-size: 28px;
+  font-size: 30px;
   line-height: 1;
   font-weight: 900;
   color: #fff;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.5px;
 }
 
 .stat-card span {

@@ -90,10 +90,6 @@ function render() {
 
   els.stats.innerHTML = `
     <article class="stat-card">
-      <strong>${state.lastRunAdded}</strong>
-      <span>本次新增</span>
-    </article>
-    <article class="stat-card">
       <strong>${total}</strong>
       <span>已采集账号</span>
     </article>
