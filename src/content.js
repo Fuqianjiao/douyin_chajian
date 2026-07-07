@@ -248,6 +248,9 @@
     };
   }
 
+  globalThis.__DOUYIN_GALLERY_COLLECT_VISIBLE__ = collectVisibleAccounts;
+  globalThis.__DOUYIN_GALLERY_RUN_WATERFALL__ = collectWaterfallAccounts;
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "DOUYIN_GALLERY_COLLECT_WATERFALL") {
       collectWaterfallAccounts(message.options || {})
