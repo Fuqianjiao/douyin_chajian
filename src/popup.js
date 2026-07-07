@@ -1,6 +1,7 @@
 const state = {
   accounts: [],
   pageShots: [],
+  lastRunAdded: 0,
   config: null
 };
 
@@ -9,7 +10,6 @@ const els = {
   statusText: document.querySelector("#statusText"),
   progress: document.querySelector("#progress"),
   stats: document.querySelector("#stats"),
-  accountList: document.querySelector("#accountList"),
   collectBtn: document.querySelector("#collectBtn"),
   captureViewBtn: document.querySelector("#captureViewBtn"),
   openGalleryBtn: document.querySelector("#openGalleryBtn")
@@ -62,14 +62,19 @@ async function loadConfig() {
 }
 
 async function loadState() {
-  const stored = await chrome.storage.local.get(["accounts", "pageShots"]);
+  const stored = await chrome.storage.local.get(["accounts", "pageShots", "lastRunAdded"]);
   state.accounts = applyCategories(stored.accounts || []);
   state.pageShots = stored.pageShots || [];
+  state.lastRunAdded = Number(stored.lastRunAdded || 0);
   render();
 }
 
 async function saveState() {
-  await chrome.storage.local.set({ accounts: state.accounts, pageShots: state.pageShots });
+  await chrome.storage.local.set({
+    accounts: state.accounts,
+    pageShots: state.pageShots,
+    lastRunAdded: state.lastRunAdded
+  });
   render();
 }
 
@@ -85,6 +90,10 @@ function render() {
 
   els.stats.innerHTML = `
     <article class="stat-card">
+      <strong>${state.lastRunAdded}</strong>
+      <span>本次新增</span>
+    </article>
+    <article class="stat-card">
       <strong>${total}</strong>
       <span>已采集账号</span>
     </article>
@@ -93,17 +102,6 @@ function render() {
       <span>已缓存截图</span>
     </article>
   `;
-
-  els.accountList.innerHTML = state.accounts.slice(0, 30).map((account) => `
-    <article class="item">
-      <img src="${escapeHtml(account.avatar)}" alt="" />
-      <div>
-        <h2>${escapeHtml(account.nickname)}</h2>
-        <p>${escapeHtml(account.intro)}</p>
-        <span class="tag">${escapeHtml(account.category)}</span>
-      </div>
-    </article>
-  `).join("");
 }
 
 async function activeDouyinTab() {
@@ -116,22 +114,89 @@ async function activeDouyinTab() {
 
 async function collectWaterfall() {
   const tab = await activeDouyinTab();
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/content.js"] });
-  setStatus("正在自动滚动关注列表并采集账号...", 20);
+  await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["src/content.js"] });
+  setStatus("正在所有页面框架中定位关注弹窗...", 20);
   const beforeCount = state.accounts.length;
-  const response = await chrome.tabs.sendMessage(tab.id, {
-    type: "DOUYIN_GALLERY_COLLECT_WATERFALL",
-    options: {
+  const probeResults = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, allFrames: true },
+    func: () => {
+      if (typeof globalThis.__DOUYIN_GALLERY_COLLECT_VISIBLE__ !== "function") {
+        return { ok: false, frameUrl: location.href, accounts: [] };
+      }
+
+      const accounts = globalThis.__DOUYIN_GALLERY_COLLECT_VISIBLE__();
+      const text = document.body?.innerText || "";
+      return {
+        ok: true,
+        frameUrl: location.href,
+        title: document.title,
+        accounts,
+        hasFollowingDialog: /关注\s*\(\d+\)|已关注|搜索用户名字或抖音号/.test(text)
+      };
+    }
+  });
+  const targetFrame = probeResults
+    .map((item) => ({ frameId: item.frameId, ...item.result }))
+    .filter((item) => item.ok)
+    .sort((a, b) => {
+      const dialogScore = Number(Boolean(b.hasFollowingDialog)) - Number(Boolean(a.hasFollowingDialog));
+      if (dialogScore !== 0) return dialogScore;
+      return (b.accounts?.length || 0) - (a.accounts?.length || 0);
+    })[0];
+
+  if (!targetFrame || !targetFrame.accounts?.length) {
+    throw new Error("没有在当前页面或 iframe 中识别到关注账号，请确认关注弹窗已打开。");
+  }
+
+  setStatus(`已定位关注弹窗 frame，首屏识别 ${targetFrame.accounts.length} 个账号，开始滚动采集...`, 30);
+  const [runResult] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, frameIds: [targetFrame.frameId] },
+    args: [{
       maxRounds: 140,
       settleMs: 900,
       idleLimit: 6
+    }],
+    func: async (options) => {
+      if (typeof globalThis.__DOUYIN_GALLERY_RUN_WATERFALL__ !== "function") {
+        return {
+          ok: false,
+          error: "当前 frame 未加载采集脚本",
+          frameUrl: location.href,
+          accounts: []
+        };
+      }
+
+      try {
+        const result = await globalThis.__DOUYIN_GALLERY_RUN_WATERFALL__(options);
+        return { ok: true, ...result };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error.message || String(error),
+          frameUrl: location.href,
+          accounts: []
+        };
+      }
     }
   });
+  const response = runResult?.result;
+
   if (!response?.ok) throw new Error(response?.error || "页面采集失败");
+  if (!response.accounts?.length) throw new Error("没有在当前页面或 iframe 中识别到关注账号，请确认关注弹窗已打开。");
+
   state.accounts = mergeAccounts(state.accounts, response.accounts || []);
-  await saveState();
   const addedCount = state.accounts.length - beforeCount;
-  setStatus(`滚动采集完成：本轮发现 ${response.accounts.length} 个账号，新增 ${addedCount} 个。${response.stopReason || ""}`, 100);
+  state.lastRunAdded = addedCount;
+  await saveState();
+  let summary;
+  if (addedCount > 0) {
+    summary = `滚动采集完成：从正确 frame 发现 ${response.accounts.length} 个账号，本次新增 ${addedCount} 个。${response.stopReason || ""}`;
+  } else if (response.accounts.length === 0) {
+    summary = `本次没有可采集的账号，请确认关注弹窗是否打开。${response.stopReason || ""}`;
+  } else {
+    summary = `本次未发现新账号：滚动共发现 ${response.accounts.length} 个，均已存在。${response.stopReason || ""}`;
+  }
+  setStatus(summary, 100);
 }
 
 async function captureCurrentView() {
@@ -211,17 +276,17 @@ function galleryHtml() {
   <style>
     :root{color-scheme:dark;--bg:#101116;--panel:#191b23;--line:#303442;--text:#f4f6f8;--muted:#a5adba;--cyan:#38d5f5;--pink:#ff2f6d}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-    main{padding:32px 40px}header{display:flex;justify-content:space-between;align-items:end;gap:24px;border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:24px}
-    h1{margin:0 0 10px;font-size:44px;line-height:1.1}p{color:var(--muted);line-height:1.6}.filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:28px}
-    button{border:1px solid var(--line);background:#20232d;color:var(--text);border-radius:8px;padding:12px 16px;font-weight:800;cursor:pointer}button.active{border-color:var(--cyan);color:var(--cyan)}
-    .folder{margin-bottom:34px}.folder-head{display:flex;justify-content:space-between;align-items:end;margin:0 0 14px}.folder-head h2{margin:0;font-size:28px}.folder-head span{color:var(--muted)}
-    .screens{margin-bottom:34px}.screen-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:20px}.screen-card{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
-    .screen-card img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;background:#252832}.screen-card div{padding:16px}.screen-card h3{margin:0 0 8px;font-size:20px}
-    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:20px}.card{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
-    .shot{width:100%;aspect-ratio:16/10;object-fit:cover;background:#252832}.body{display:grid;grid-template-columns:58px 1fr;gap:14px;padding:16px}.avatar{width:58px;height:58px;border-radius:50%;object-fit:cover}
-    h3{margin:0 0 8px;font-size:21px}.body p{margin:0}.body span{display:inline-block;margin-top:12px;color:var(--cyan);font-weight:800}
-    footer{display:flex;justify-content:space-between;gap:12px;padding:0 16px 16px;align-items:center}a{color:var(--pink);font-weight:800;text-decoration:none}small{color:var(--muted)}
-    @media(max-width:720px){main{padding:20px}header{display:block}h1{font-size:32px}.grid{grid-template-columns:1fr}}
+    main{padding:24px 28px}header{display:flex;justify-content:space-between;align-items:end;gap:18px;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:20px}
+    h1{margin:0 0 8px;font-size:30px;line-height:1.1}p{color:var(--muted);font-size:14px;line-height:1.5}.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+    button{border:1px solid var(--line);background:#20232d;color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:800;cursor:pointer}button.active{border-color:var(--cyan);color:var(--cyan)}
+    .folder{margin-bottom:24px}.folder-head{display:flex;justify-content:space-between;align-items:end;margin:0 0 12px}.folder-head h2{margin:0;font-size:20px}.folder-head span{color:var(--muted);font-size:13px}
+    .screens{margin-bottom:22px}.screen-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}.screen-card{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+    .screen-card img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;background:#252832}.screen-card div{padding:12px}.screen-card h3{margin:0 0 6px;font-size:16px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.card{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+    .shot{width:100%;aspect-ratio:16/10;object-fit:cover;background:#252832}.body{display:grid;grid-template-columns:44px 1fr;gap:10px;padding:12px}.avatar{width:44px;height:44px;border-radius:50%;object-fit:cover}
+    h3{margin:0 0 6px;font-size:16px}.body p{margin:0}.body span{display:inline-block;margin-top:8px;color:var(--cyan);font-size:13px;font-weight:800}
+    footer{display:flex;justify-content:space-between;gap:10px;padding:0 12px 12px;align-items:center}a{color:var(--pink);font-weight:800;text-decoration:none}small{color:var(--muted);font-size:12px}
+    @media(max-width:720px){main{padding:20px}header{display:block}h1{font-size:26px}.grid{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -328,6 +393,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (changes.pageShots?.newValue) {
     state.pageShots = changes.pageShots.newValue;
+    render();
+  }
+  if (changes.lastRunAdded?.newValue !== undefined) {
+    state.lastRunAdded = changes.lastRunAdded.newValue;
     render();
   }
 });

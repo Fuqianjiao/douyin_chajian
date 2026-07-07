@@ -1,0 +1,8 @@
+.workbuddy/
+assets/
+data/
+outputs/
+work/
+*.log
+.DS_Store
+node_modules/
