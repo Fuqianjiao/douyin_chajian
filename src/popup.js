@@ -348,10 +348,8 @@ async function openOfflineGallery() {
     config: state.config,
     gallerySyncedAt: new Date().toISOString()
   });
-  await exportGallery();
-  await exportJson();
   await chrome.tabs.create({ url: chrome.runtime.getURL("src/gallery.html") });
-  setStatus("已打开离线画廊，并同步下载版画廊文件。", 100);
+  setStatus("已打开离线画廊。", 100);
 }
 
 function setBusy(busy) {

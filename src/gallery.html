@@ -3,27 +3,37 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>起号学习离线画廊</title>
+    <title>抖音起号学习画廊</title>
     <link rel="stylesheet" href="./gallery.css" />
   </head>
   <body>
     <main>
-      <header>
-        <div>
-          <h1>起号学习离线画廊</h1>
+      <header class="topbar">
+        <div class="title-block">
+          <h1>抖音起号学习画廊</h1>
           <p id="summary">正在读取本地采集数据...</p>
+        </div>
+        <div class="actions">
+          <button class="primary" id="captureMissingBtn" title="只为还没截图的账号补一张">仅补缺失截图</button>
+          <button id="bulkTagBtn">批量标签</button>
+          <button id="stopBtn">中途停止</button>
+          <button id="logBtn">查看日志</button>
+          <button id="exportJsonBtn">导出 JSON</button>
         </div>
       </header>
 
-      <section class="screens">
-        <div class="section-head">
-          <h2>主页截图</h2>
-          <span id="shotCount">0 张截图</span>
-        </div>
-        <div class="screen-grid" id="screenGrid"></div>
+      <section class="log hidden" id="logPanel" aria-label="运行日志">
+        <pre id="logContent">暂无日志。</pre>
       </section>
 
-      <nav class="filters" id="filters"></nav>
+      <div class="filter-bar">
+        <div class="search">
+          <input id="searchInput" type="search" placeholder="博主名称" />
+        </div>
+        <button class="ghost" id="moreFilterBtn">更多筛选</button>
+      </div>
+
+      <nav class="filters" id="filters" aria-label="分类筛选"></nav>
       <section id="folders"></section>
     </main>
     <script src="./gallery.js"></script>
