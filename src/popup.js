@@ -29,7 +29,10 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
-function classify(account) {
+const MAX_TAGS_PER_ACCOUNT = 6;
+const MIN_TAGS_PER_ACCOUNT = 1;
+
+function classifyTag(account) {
   const text = [account.nickname, account.bio, account.douyinId, ...(account.rawTexts || [])].join(" ").toLowerCase();
   const matches = [];
   for (const category of state.config.categories) {
@@ -40,18 +43,53 @@ function classify(account) {
   return matches[0]?.name || state.config.defaultCategory || "未分类";
 }
 
+function ensureAiTag(account) {
+  const tags = Array.isArray(account.tags) ? account.tags.slice() : [];
+  if (!tags.some((t) => t.source === "ai")) {
+    tags.unshift({ name: classifyTag(account), source: "ai" });
+  }
+  if (tags.length > MAX_TAGS_PER_ACCOUNT) tags.length = MAX_TAGS_PER_ACCOUNT;
+  if (tags.length < MIN_TAGS_PER_ACCOUNT) {
+    tags.push({ name: state.config.defaultCategory || "未分类", source: "ai" });
+  }
+  const seen = new Set();
+  return tags.filter((tag) => {
+    const key = `${tag.source}::${tag.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function applyCategories(accounts) {
-  return accounts.map((account) => ({
-    ...account,
-    category: account.category || classify(account),
-    intro: account.bio || account.douyinId || "暂无页面可见简介"
-  }));
+  return accounts.map((account) => {
+    const tags = ensureAiTag(account);
+    const firstTag = tags[0]?.name || "未分类";
+    return {
+      ...account,
+      tags,
+      category: account.category || firstTag,
+      intro: account.bio || account.douyinId || "暂无页面可见简介"
+    };
+  });
 }
 
 function mergeAccounts(existing, incoming) {
   const map = new Map(existing.map((account) => [account.homeUrl, account]));
   for (const account of incoming) {
-    map.set(account.homeUrl, { ...map.get(account.homeUrl), ...account });
+    const old = map.get(account.homeUrl) || {};
+    const mergedTags = (() => {
+      const oldAi = (old.tags || []).filter((t) => t.source === "ai");
+      const oldHuman = (old.tags || []).filter((t) => t.source === "human");
+      const incomingAi = (account.tags || []).filter((t) => t.source === "ai");
+      const incomingHuman = (account.tags || []).filter((t) => t.source === "human");
+      const out = [...oldAi];
+      for (const t of incomingAi) if (!out.some((x) => x.name === t.name)) out.push(t);
+      for (const t of oldHuman) if (!out.some((x) => x.name === t.name)) out.push(t);
+      for (const t of incomingHuman) if (!out.some((x) => x.name === t.name)) out.push(t);
+      return out.slice(0, MAX_TAGS_PER_ACCOUNT);
+    })();
+    map.set(account.homeUrl, { ...old, ...account, tags: mergedTags });
   }
   return applyCategories([...map.values()]);
 }
