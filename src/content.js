@@ -162,16 +162,34 @@
     });
   }
 
+  function countUserAnchorsIn(element) {
+    if (!element) return 0;
+    return [...element.querySelectorAll("a[href]")].filter(looksLikeUserAnchor).length;
+  }
+
   function scoreScroller(element) {
     if (element === document.scrollingElement) return 1;
     const rect = element.getBoundingClientRect();
     const style = getComputedStyle(element);
-    const text = normalizeText(element.innerText || "").slice(0, 500);
+    const text = normalizeText(element.innerText || "").slice(0, 800);
     let score = rect.width * rect.height;
 
-    if (/关注/.test(text)) score += 500000;
+    // 最强信号：弹窗内的 Semi Design 激活面板（抖音关注/粉丝列表的滚动容器）
+    if (element.classList?.contains("semi-tabs-pane-active")) score += 2000000;
+    if (element.classList?.contains("semi-tabs-pane") && !element.classList?.contains("semi-tabs-pane-inactive")) score += 1500000;
+
+    // 强信号：容器内包含 3 个以上用户主页链接——确认是关注/粉丝列表
+    const userAnchorCount = countUserAnchorsIn(element);
+    if (userAnchorCount >= 3) score += 1200000 + userAnchorCount * 2000;
+    else if (userAnchorCount > 0) score += userAnchorCount * 5000;
+
+    // 中等信号：含「关注」等关键词
+    if (/关注\s*\(\d+\)/.test(text)) score += 700000;
+    else if (/关注/.test(text)) score += 300000;
     if (/粉丝/.test(text)) score += 160000;
     if (/搜索用户|搜索.*抖音号|已关注/.test(text)) score += 140000;
+
+    // 弹窗特征：fixed/absolute 定位且不占满视口
     if (style.position === "fixed" || style.position === "absolute") score += 90000;
     if (rect.width < window.innerWidth * 0.88 && rect.height < window.innerHeight * 0.95) score += 70000;
     if (rect.top > 20 && rect.left > 20) score += 30000;
@@ -181,8 +199,12 @@
 
   function findBestScroller() {
     const candidates = visibleScrollableElements();
-    candidates.sort((a, b) => scoreScroller(b) - scoreScroller(a));
-    return candidates[0] || document.scrollingElement;
+    if (!candidates.length) return document.scrollingElement;
+    const withScores = candidates.map((node) => ({ node, score: scoreScroller(node) }));
+    withScores.sort((a, b) => b.score - a.score);
+    const best = withScores[0];
+    if (best && countUserAnchorsIn(best.node) >= 3) return best.node;
+    return best?.node || document.scrollingElement;
   }
 
   function broadcastProgress(payload) {
