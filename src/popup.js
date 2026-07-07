@@ -186,11 +186,9 @@ async function collectWaterfall() {
   await saveState();
   let summary;
   if (addedCount > 0) {
-    summary = `滚动采集完成：从正确 frame 发现 ${response.accounts.length} 个账号，本次新增 ${addedCount} 个。${response.stopReason || ""}`;
-  } else if (response.accounts.length === 0) {
-    summary = `本次没有可采集的账号，请确认关注弹窗是否打开。${response.stopReason || ""}`;
+    summary = `滚动采集完成：发现 ${response.accounts.length} 个账号，本次新增 ${addedCount} 个。${response.stopReason || ""}`;
   } else {
-    summary = `本次未发现新账号：滚动共发现 ${response.accounts.length} 个，均已存在。${response.stopReason || ""}`;
+    summary = `滚动采集完成：发现 ${response.accounts.length} 个账号，本次未发现新账号（全部已存在）。${response.stopReason || ""}`;
   }
   setStatus(summary, 100);
 }
