@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>起号学习看板</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <h1>起号学习看板</h1>
+          <p id="summary">打开抖音关注弹窗后开始采集。</p>
+        </div>
+      </header>
+
+      <section class="panel">
+        <button id="collectBtn" class="primary">开启实时滚动采集</button>
+        <button id="captureViewBtn">缓存当前主页截图</button>
+        <button id="openGalleryBtn">打开离线画廊</button>
+      </section>
+
+      <section class="status">
+        <div id="statusText">请先打开抖音关注列表弹窗，再开始滚动采集。</div>
+        <progress id="progress" max="100" value="0"></progress>
+      </section>
+
+      <section class="stats" id="stats"></section>
+      <section class="list" id="accountList" aria-label="最近采集账号"></section>
+    </main>
+    <script src="./popup.js"></script>
+  </body>
+</html>
