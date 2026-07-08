@@ -80,13 +80,54 @@ function normalizeAccountText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
-function cleanAccountIdentity(account) {
-  const bio = normalizeAccountText(account.bio || account.intro || "");
-  let nickname = normalizeAccountText(account.nickname || "");
+function cleanInlineBio(value) {
+  return normalizeAccountText(value)
+    .replace(/\b\d+\s*个作品未看\b/g, "")
+    .replace(/^\s*[：:｜|,，。-]+/, "")
+    .trim();
+}
 
-  if (bio && nickname && nickname !== bio && nickname.endsWith(bio)) {
-    nickname = normalizeAccountText(nickname.slice(0, -bio.length));
+function isUsableNamePart(value) {
+  const text = normalizeAccountText(value);
+  if (!text || text.length > 36) return false;
+  if (/已关注|关注|粉丝|获赞|作品未看|移除粉丝|搜索用户|综合排序/.test(text)) return false;
+  return true;
+}
+
+function cleanAccountIdentity(account) {
+  let bio = normalizeAccountText(account.bio || account.intro || "");
+  let nickname = normalizeAccountText(account.nickname || "");
+  const rawTexts = Array.isArray(account.rawTexts)
+    ? account.rawTexts.map(normalizeAccountText).filter(Boolean)
+    : [];
+  const candidates = rawTexts
+    .filter((text) => text !== nickname)
+    .filter((text) => nickname.startsWith(`${text} `) || nickname.startsWith(text))
+    .filter(isUsableNamePart)
+    .sort((a, b) => a.length - b.length);
+
+  if (candidates.length) {
+    const name = candidates[0];
+    const rest = cleanInlineBio(nickname.slice(name.length));
+    nickname = name;
+    if (rest && (!bio || bio === name || bio.length < rest.length)) bio = rest;
+  } else if (bio && nickname && nickname !== bio) {
+    if (nickname.startsWith(bio) && isUsableNamePart(bio)) {
+      const rest = cleanInlineBio(nickname.slice(bio.length));
+      if (rest) {
+        nickname = bio;
+        bio = rest;
+      }
+    } else if (nickname.endsWith(bio)) {
+      nickname = normalizeAccountText(nickname.slice(0, -bio.length));
+    } else if (nickname.includes(bio)) {
+      const index = nickname.indexOf(bio);
+      const before = cleanInlineBio(nickname.slice(0, index));
+      if (isUsableNamePart(before)) nickname = before;
+    }
   }
+
+  bio = cleanInlineBio(bio);
 
   if (!nickname) nickname = "未命名账号";
 
@@ -731,10 +772,14 @@ function bindEvents() {
 (async function init() {
   bindEvents();
   const stored = await chrome.storage.local.get(["accounts", "pageShots"]);
+  const originalAccountsJson = JSON.stringify(stored.accounts || []);
   state.accounts = (stored.accounts || []).map((a) => {
     const clean = cleanAccountIdentity(a);
     return { ...clean, tags: ensureTags(clean) };
   });
+  if (originalAccountsJson !== JSON.stringify(state.accounts)) {
+    await chrome.storage.local.set({ accounts: state.accounts });
+  }
   state.pageShots = stored.pageShots || [];
   renderTagFilterOptions();
   renderBatchTags();
