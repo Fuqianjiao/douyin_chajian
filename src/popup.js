@@ -140,6 +140,36 @@ function applyCategories(accounts) {
     });
 }
 
+function profileKey(url) {
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/\/user\/[^/?#]+/i);
+    return match ? match[0].toLowerCase() : "";
+  } catch {
+    const match = String(url || "").match(/\/user\/[^/?#]+/i);
+    return match ? match[0].toLowerCase() : "";
+  }
+}
+
+function findAccountByUrl(url) {
+  const key = profileKey(url);
+  if (!key) return null;
+  return state.accounts.find((account) => profileKey(account.homeUrl) === key) || null;
+}
+
+function upsertProfileNote(existingNote, profileDetail) {
+  const detail = normalizeAccountText(profileDetail);
+  if (!detail) return existingNote || "";
+  const marker = "【主页详细介绍】";
+  const block = `${marker}\n${detail}`;
+  const note = String(existingNote || "").trim();
+  if (!note) return block;
+  if (note.includes(marker)) {
+    return note.replace(new RegExp(`\\n*${marker}[\\s\\S]*$`), `\n\n${block}`).trim();
+  }
+  return `${note}\n\n${block}`;
+}
+
 function mergeAccounts(existing, incoming) {
   const map = new Map(existing.map((account) => [account.homeUrl, account]));
   for (const account of incoming) {
@@ -303,7 +333,68 @@ async function collectWaterfall() {
 
 async function captureCurrentView() {
   const tab = await activeDouyinTab();
-  setStatus("正在截取当前抖音界面...", 35);
+  setStatus("正在读取主页详细介绍...", 25);
+  const [profileResult] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const visible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const fire = (element, type) => {
+        element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      };
+
+      const moreTargets = [...document.querySelectorAll("button, span, div, a")]
+        .filter(visible)
+        .filter((node) => normalize(node.textContent) === "更多");
+
+      for (const target of moreTargets.slice(0, 3)) {
+        fire(target, "mouseover");
+        fire(target, "mouseenter");
+        fire(target, "mousemove");
+        target.click?.();
+        await wait(180);
+      }
+      await wait(450);
+
+      const blocked = /关注|粉丝|获赞|作品|推荐|喜欢|收藏|私密作品|合集|短剧|搜索|分享主页|下载|客户端|已关注|私信/;
+      const tooltipTexts = [...document.querySelectorAll("[role='tooltip'], .semi-tooltip, .semi-tooltip-content, .semi-popover, .semi-portal-inner")]
+        .filter(visible)
+        .map((node) => normalize(node.innerText || node.textContent))
+        .filter((text) => text && text !== "更多" && text.length <= 260)
+        .filter((text) => !blocked.test(text) || /[@#｜|，,。.!！?？]/.test(text));
+
+      const profileRegion = [...document.querySelectorAll("main, header, section, div")]
+        .filter(visible)
+        .map((node) => normalize(node.innerText || node.textContent))
+        .filter((text) => text.includes("抖音号") && text.length <= 900)
+        .sort((a, b) => a.length - b.length)[0] || "";
+      const inlineMatch = profileRegion.match(/(?:IP属地[:：]?\s*\S+\s*)?(.{4,180}?)(?:\s*更多|\s*作品|\s*推荐|\s*喜欢|$)/);
+      const inlineBio = normalize(inlineMatch?.[1] || "")
+        .replace(/^.*?抖音号[:：]?\s*[A-Za-z0-9_.-]+\s*/i, "")
+        .replace(/^IP属地[:：]?\s*\S+\s*/, "");
+
+      const detail = tooltipTexts
+        .concat(inlineBio)
+        .map((text) => text.replace(/^更多\s*/, "").trim())
+        .filter((text) => text && text.length >= 4)
+        .sort((a, b) => b.length - a.length)[0] || "";
+
+      return {
+        url: location.href,
+        title: document.title,
+        profileDetail: detail
+      };
+    }
+  });
+  const profile = profileResult?.result || {};
+
+  setStatus("正在截取当前抖音界面...", 55);
   const response = await chrome.runtime.sendMessage({
     type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
     tab: {
@@ -314,9 +405,26 @@ async function captureCurrentView() {
     }
   });
   if (!response?.ok) throw new Error(response?.error || "当前界面截图失败");
+
+  const matchedAccount = findAccountByUrl(profile.url || tab.url);
+  if (matchedAccount) {
+    response.shot.accountId = matchedAccount.id;
+    response.shot.accountNickname = matchedAccount.nickname;
+    if (profile.profileDetail) {
+      matchedAccount.note = upsertProfileNote(matchedAccount.note, profile.profileDetail);
+      matchedAccount.profileDetail = profile.profileDetail;
+      matchedAccount.profileDetailSyncedAt = new Date().toISOString();
+    }
+  }
   state.pageShots = [response.shot, ...state.pageShots].slice(0, 12);
   await saveState();
-  setStatus("当前界面截图已保存，并会进入画廊。", 100);
+  if (matchedAccount && profile.profileDetail) {
+    setStatus(`已截图，并同步「${matchedAccount.nickname}」主页介绍到备注。`, 100);
+  } else if (matchedAccount) {
+    setStatus(`已截图并关联「${matchedAccount.nickname}」，未读取到更多介绍。`, 100);
+  } else {
+    setStatus("当前界面截图已保存，未匹配到已采集账号。", 100);
+  }
 }
 
 function groupedAccounts() {

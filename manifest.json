@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "起号学习看板",
   "description": "滚动采集抖音关注瀑布列表，缓存当前主页截图，并打开离线画廊。",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "action": {
     "default_popup": "src/popup.html",
     "default_title": "起号学习看板"
