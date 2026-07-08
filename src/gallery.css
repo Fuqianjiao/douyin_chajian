@@ -460,6 +460,33 @@ h3 {
   text-overflow: ellipsis;
 }
 
+h3.nickname {
+  cursor: pointer;
+  outline: none;
+}
+
+h3.nickname:focus-visible {
+  text-decoration: underline dotted var(--cyan);
+}
+
+.nickname-tip {
+  position: absolute;
+  z-index: 50;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(24, 26, 32, .96);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .4);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  pointer-events: none;
+}
+
 .intro {
   margin: 4px 0 0;
   color: var(--muted);
@@ -742,6 +769,102 @@ h3 {
   margin-top: 14px;
   color: var(--text);
   font-weight: 700;
+}
+
+.note-section {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .02);
+}
+
+.note-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.note-section-head .hint {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.note-section textarea {
+  resize: vertical;
+  min-height: 64px;
+  margin: 0;
+}
+
+.note-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.note-image-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 74px;
+  height: 74px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .02);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.note-image-add:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.note-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.note-thumb {
+  position: relative;
+  width: 74px;
+  height: 74px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #0b0c0f;
+}
+
+.note-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.note-thumb .remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .72);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
 }
 
 .tag-editor {

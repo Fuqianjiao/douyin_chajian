@@ -29,6 +29,7 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+const SELF_URL_PATTERN = /\/user\/self(\b|[/?#])/i;
 const MAX_TAGS_PER_ACCOUNT = 6;
 const MIN_TAGS_PER_ACCOUNT = 1;
 
@@ -62,16 +63,18 @@ function ensureAiTag(account) {
 }
 
 function applyCategories(accounts) {
-  return accounts.map((account) => {
-    const tags = ensureAiTag(account);
-    const firstTag = tags[0]?.name || "未分类";
-    return {
-      ...account,
-      tags,
-      category: account.category || firstTag,
-      intro: account.bio || account.douyinId || "暂无页面可见简介"
-    };
-  });
+  return accounts
+    .filter((account) => !SELF_URL_PATTERN.test(account.homeUrl || ""))
+    .map((account) => {
+      const tags = ensureAiTag(account);
+      const firstTag = tags[0]?.name || "未分类";
+      return {
+        ...account,
+        tags,
+        category: account.category || firstTag,
+        intro: account.bio || account.douyinId || "暂无页面可见简介"
+      };
+    });
 }
 
 function mergeAccounts(existing, incoming) {
@@ -104,6 +107,9 @@ async function loadState() {
   state.accounts = applyCategories(stored.accounts || []);
   state.pageShots = stored.pageShots || [];
   state.lastRunAdded = Number(stored.lastRunAdded || 0);
+  if ((stored.accounts || []).some((a) => SELF_URL_PATTERN.test(a.homeUrl || ""))) {
+    await chrome.storage.local.set({ accounts: state.accounts });
+  }
   render();
 }
 

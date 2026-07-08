@@ -37,6 +37,8 @@ const els = {
   addTag: document.querySelector("#addTag"),
   editorTags: document.querySelector("#editorTags"),
   noteText: document.querySelector("#noteText"),
+  noteImages: document.querySelector("#noteImages"),
+  notePreview: document.querySelector("#notePreview"),
   saveEditor: document.querySelector("#saveEditor"),
   logsModal: document.querySelector("#logsModal"),
   logsContent: document.querySelector("#logsContent"),
@@ -61,6 +63,7 @@ const state = {
   batchSelected: new Set(),
   batchTagSelected: new Set(),
   editingAccountId: null,
+  editingNoteImages: [],
   logs: []
 };
 
@@ -71,6 +74,15 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => resolve("");
+    reader.readAsDataURL(file);
+  });
 }
 
 function ensureTags(account) {
@@ -95,7 +107,9 @@ function shotFor(accountId) {
 }
 
 function hasNote(account) {
-  return Boolean(account.note && account.note.trim());
+  if (account.note && account.note.trim()) return true;
+  if (Array.isArray(account.noteImages) && account.noteImages.length > 0) return true;
+  return false;
 }
 
 function matchFilters(account) {
@@ -205,7 +219,7 @@ function renderCard(account) {
         <div class="profile">
           <img class="avatar" src="${escapeHtml(account.avatar || "")}" alt="">
           <div>
-            <h3>${escapeHtml(account.nickname || "未命名账号")}</h3>
+            <h3 class="nickname" tabindex="0" data-copy="${escapeHtml(account.nickname || "未命名账号")}" data-account-id="${escapeHtml(account.id)}">${escapeHtml(account.nickname || "未命名账号")}</h3>
             <p class="intro">${escapeHtml(account.bio || account.intro || "暂无页面可见简介")}</p>
           </div>
         </div>
@@ -243,6 +257,71 @@ function bindCardEvents() {
       updateBatchCount();
     });
   });
+  els.content.querySelectorAll(".nickname").forEach((node) => {
+    node.addEventListener("mouseenter", () => showNicknameTooltip(node));
+    node.addEventListener("focus", () => showNicknameTooltip(node));
+    node.addEventListener("mouseleave", () => hideNicknameTooltip());
+    node.addEventListener("blur", () => hideNicknameTooltip());
+    node.addEventListener("keydown", (event) => {
+      if ((event.key === "c" || event.key === "C") && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        copyNickname(node);
+      }
+    });
+  });
+}
+
+function showNicknameTooltip(node) {
+  const full = node.dataset.copy || node.textContent;
+  const isTruncated = node.scrollWidth > node.clientWidth + 1;
+  if (!isTruncated) return;
+  const tip = ensureTooltip();
+  tip.textContent = `${full}  ⌘/Ctrl+C 复制`;
+  const rect = node.getBoundingClientRect();
+  tip.style.top = `${rect.bottom + window.scrollY + 6}px`;
+  tip.style.left = `${rect.left + window.scrollX}px`;
+  tip.hidden = false;
+  node._tipActive = true;
+}
+
+function hideNicknameTooltip() {
+  const tip = document.getElementById("nicknameTip");
+  if (tip) tip.hidden = true;
+}
+
+function ensureTooltip() {
+  let tip = document.getElementById("nicknameTip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "nicknameTip";
+    tip.className = "nickname-tip";
+    tip.hidden = true;
+    document.body.appendChild(tip);
+  }
+  return tip;
+}
+
+async function copyNickname(node) {
+  const text = node.dataset.copy || node.textContent || "";
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("已复制", `「${text}」已复制到剪贴板`);
+  } catch (err) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+      showToast("已复制", `「${text}」已复制到剪贴板`);
+    } catch (e2) {
+      showToast("复制失败", "请手动选择复制");
+    } finally {
+      document.body.removeChild(ta);
+    }
+  }
 }
 
 function updateBatchCount() {
@@ -280,8 +359,26 @@ function openEditor(accountId) {
   state.editingAccountId = accountId;
   els.editorTitle.textContent = `编辑「${account.nickname}」`;
   els.noteText.value = account.note || "";
+  state.editingNoteImages = Array.isArray(account.noteImages) ? account.noteImages.slice() : [];
+  renderNotePreview();
   renderEditorTags();
   els.editorModal.hidden = false;
+}
+
+function renderNotePreview() {
+  els.notePreview.innerHTML = state.editingNoteImages.map((url, index) => `
+    <div class="note-thumb">
+      <img src="${escapeHtml(url)}" alt="备注图 ${index + 1}">
+      <button class="remove" data-remove-image="${index}" type="button" title="移除">×</button>
+    </div>
+  `).join("");
+  els.notePreview.querySelectorAll("[data-remove-image]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.removeImage);
+      state.editingNoteImages.splice(idx, 1);
+      renderNotePreview();
+    });
+  });
 }
 
 function renderEditorTags() {
@@ -339,6 +436,7 @@ function saveEditor() {
   const account = state.accounts.find((a) => a.id === state.editingAccountId);
   if (!account) return;
   account.note = els.noteText.value.trim();
+  account.noteImages = state.editingNoteImages.slice();
   persist();
   renderContent();
   els.editorModal.hidden = true;
@@ -592,6 +690,16 @@ function bindEvents() {
     if (event.key === "Enter") { event.preventDefault(); addTagInEditor(); }
   });
   els.saveEditor.addEventListener("click", saveEditor);
+
+  els.noteImages.addEventListener("change", async (event) => {
+    const files = [...(event.target.files || [])];
+    for (const file of files) {
+      const dataUrl = await readFileAsDataUrl(file);
+      if (dataUrl) state.editingNoteImages.push(dataUrl);
+    }
+    event.target.value = "";
+    renderNotePreview();
+  });
 
   els.confirmCancel.addEventListener("click", () => { els.confirmModal.hidden = true; });
 }

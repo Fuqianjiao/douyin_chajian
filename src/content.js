@@ -6,6 +6,7 @@
     /https:\/\/www\.douyin\.com\/user\/[^/?#\s"]+/i,
     /\/user\/[^/?#\s"]+/i
   ];
+  const SELF_URL_PATTERN = /\/user\/self(\b|[/?#])/i;
 
   function normalizeText(value) {
     return (value || "").replace(/\s+/g, " ").trim();
@@ -86,6 +87,7 @@
 
   function looksLikeUserAnchor(anchor) {
     const href = anchor.getAttribute("href") || "";
+    if (SELF_URL_PATTERN.test(href)) return false;
     return USER_URL_PATTERNS.some((pattern) => pattern.test(href)) && isVisible(anchor);
   }
 

@@ -94,10 +94,20 @@
         </label>
         <p id="tagHint" class="hint">AI 标签 + 自定义标签最多 6 个，至少保留 1 个 AI 标签。</p>
         <div id="editorTags" class="editor-tag-list tag-list" aria-label="当前已选标签"></div>
-        <label>
-          备注文字
-          <textarea id="noteText" rows="5" placeholder="记录这个博主值得学习的点、选题、脚本结构、风格等"></textarea>
-        </label>
+        <div class="note-section">
+          <div class="note-section-head">
+            <span>备注</span>
+            <span class="hint">支持文本和图片，文本内容参与搜索</span>
+          </div>
+          <textarea id="noteText" rows="3" placeholder="记录值得学习的点、选题、脚本结构、风格等"></textarea>
+          <div class="note-images">
+            <label class="note-image-add" for="noteImages">
+              <span>＋ 添加图片</span>
+              <input id="noteImages" type="file" accept="image/*" multiple hidden>
+            </label>
+            <div id="notePreview" class="note-preview"></div>
+          </div>
+        </div>
         <div class="modal-actions">
           <button id="saveEditor" type="button">保存</button>
         </div>
