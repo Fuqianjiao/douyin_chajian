@@ -33,6 +33,27 @@ const SELF_URL_PATTERN = /\/user\/self(\b|[/?#])/i;
 const MAX_TAGS_PER_ACCOUNT = 6;
 const MIN_TAGS_PER_ACCOUNT = 1;
 
+function normalizeAccountText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function cleanAccountIdentity(account) {
+  const bio = normalizeAccountText(account.bio || account.intro || "");
+  let nickname = normalizeAccountText(account.nickname || "");
+
+  if (bio && nickname && nickname !== bio && nickname.endsWith(bio)) {
+    nickname = normalizeAccountText(nickname.slice(0, -bio.length));
+  }
+
+  if (!nickname) nickname = "未命名账号";
+
+  return {
+    ...account,
+    nickname,
+    bio
+  };
+}
+
 function classifyTag(account) {
   const text = [account.nickname, account.bio, account.douyinId, ...(account.rawTexts || [])].join(" ").toLowerCase();
   const matches = [];
@@ -65,7 +86,8 @@ function ensureAiTag(account) {
 function applyCategories(accounts) {
   return accounts
     .filter((account) => !SELF_URL_PATTERN.test(account.homeUrl || ""))
-    .map((account) => {
+    .map((rawAccount) => {
+      const account = cleanAccountIdentity(rawAccount);
       const tags = ensureAiTag(account);
       const firstTag = tags[0]?.name || "未分类";
       return {

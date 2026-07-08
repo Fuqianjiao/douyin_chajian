@@ -76,6 +76,28 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+function normalizeAccountText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function cleanAccountIdentity(account) {
+  const bio = normalizeAccountText(account.bio || account.intro || "");
+  let nickname = normalizeAccountText(account.nickname || "");
+
+  if (bio && nickname && nickname !== bio && nickname.endsWith(bio)) {
+    nickname = normalizeAccountText(nickname.slice(0, -bio.length));
+  }
+
+  if (!nickname) nickname = "未命名账号";
+
+  return {
+    ...account,
+    nickname,
+    bio,
+    intro: bio || account.douyinId || "暂无页面可见简介"
+  };
+}
+
 function readFileAsDataUrl(file) {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -113,6 +135,7 @@ function hasNote(account) {
 }
 
 function matchFilters(account) {
+  account = cleanAccountIdentity(account);
   if (state.searchKeyword) {
     const kw = state.searchKeyword.toLowerCase();
     const hay = [account.nickname, account.bio, account.intro, account.douyinId, account.note || ""].join(" ").toLowerCase();
@@ -200,6 +223,7 @@ function renderContent() {
 }
 
 function renderCard(account) {
+  account = cleanAccountIdentity(account);
   const shot = shotFor(account.id);
   const tags = ensureTags(account);
   const isSelected = state.batchSelected.has(account.id);
@@ -707,7 +731,10 @@ function bindEvents() {
 (async function init() {
   bindEvents();
   const stored = await chrome.storage.local.get(["accounts", "pageShots"]);
-  state.accounts = (stored.accounts || []).map((a) => ({ ...a, tags: ensureTags(a) }));
+  state.accounts = (stored.accounts || []).map((a) => {
+    const clean = cleanAccountIdentity(a);
+    return { ...clean, tags: ensureTags(clean) };
+  });
   state.pageShots = stored.pageShots || [];
   renderTagFilterOptions();
   renderBatchTags();

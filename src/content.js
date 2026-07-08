@@ -28,10 +28,14 @@
   }
 
   function nearestAccountBlock(anchor) {
+    const row = anchor.closest(".OlxToPIh, [data-e2e='user-fans-item'], [data-e2e='user-following-item']");
+    if (row) return row;
+
     let current = anchor;
     for (let i = 0; i < 7 && current; i += 1) {
       const rect = current.getBoundingClientRect();
-      if (rect.width >= 180 && rect.height >= 48) return current;
+      const text = normalizeText(current.innerText || current.textContent);
+      if (rect.width >= 180 && rect.height >= 48 && /已关注|关注|作品未看|移除粉丝/.test(text)) return current;
       current = current.parentElement;
     }
     return anchor;
@@ -52,10 +56,11 @@
   }
 
   function textCandidates(block) {
-    const nodes = [...block.querySelectorAll("span, div, p, h1, h2, h3, strong")].filter(isVisible);
+    const nodes = [...block.querySelectorAll("a, span, div, p, h1, h2, h3, strong")].filter(isVisible);
     return nodes
       .map((node) => normalizeText(node.innerText || node.textContent))
       .filter((text) => text && text.length <= 120)
+      .filter((text) => !/^已关注$|^关注$|^移除粉丝/.test(text))
       .filter((text, index, arr) => arr.indexOf(text) === index);
   }
 
@@ -68,19 +73,30 @@
   }
 
   function pickNickname(anchor, texts) {
+    const block = nearestAccountBlock(anchor);
+    const nameAnchor = block.querySelector(".Zce7SWd3 a[href*='/user/'], a[href*='/user/'] span span span span span");
+    const nameText = normalizeText(nameAnchor?.innerText || nameAnchor?.textContent);
+    if (nameText && nameText.length <= 40 && !/已关注|关注|作品未看|搜索用户/.test(nameText)) return nameText;
+
     const title = normalizeText(anchor.getAttribute("title") || anchor.getAttribute("aria-label"));
     if (title && !title.includes("关注") && title.length <= 40) return title;
+    const imgAlt = normalizeText(anchor.querySelector("img")?.getAttribute("alt") || "").replace(/头像$/, "");
+    if (imgAlt && imgAlt.length <= 40) return imgAlt;
     return texts.find((text) => {
       if (text.includes("粉丝") || text.includes("获赞") || text.includes("关注")) return false;
       if (/抖音号|Douyin ID/i.test(text)) return false;
+      if (/作品未看|移除粉丝|搜索用户/.test(text)) return false;
       return text.length > 0 && text.length <= 32;
     }) || "未命名账号";
   }
 
-  function pickBio(texts, nickname, douyinId) {
+  function pickBio(texts, nickname, douyinId, block) {
+    const bioText = normalizeText(block.querySelector(".ceyzKypd")?.innerText || block.querySelector(".ceyzKypd")?.textContent);
+    if (bioText && bioText !== nickname && bioText.length <= 80 && !/作品未看|已关注|移除粉丝/.test(bioText)) return bioText;
+
     return texts.find((text) => {
       if (text === nickname || text === douyinId) return false;
-      if (/抖音号|粉丝|关注|获赞|私信|作品/i.test(text)) return false;
+      if (/抖音号|粉丝|关注|获赞|私信|作品|移除粉丝/i.test(text)) return false;
       return text.length >= 4 && text.length <= 80;
     }) || "";
   }
@@ -92,7 +108,8 @@
   }
 
   function collectVisibleAccounts() {
-    const anchors = [...document.querySelectorAll("a[href]")].filter(looksLikeUserAnchor);
+    const anchors = [...document.querySelectorAll(".OlxToPIh a[href*='/user/'], [data-e2e='user-fans-item'] a[href*='/user/'], [data-e2e='user-following-item'] a[href*='/user/'], a[href]")]
+      .filter(looksLikeUserAnchor);
     const seen = new Map();
 
     for (const anchor of anchors) {
@@ -103,7 +120,7 @@
       const texts = textCandidates(block);
       const nickname = pickNickname(anchor, texts);
       const douyinId = extractDouyinId(texts);
-      const bio = pickBio(texts, nickname, douyinId);
+      const bio = pickBio(texts, nickname, douyinId, block);
       const avatar = pickAvatar(block);
 
       seen.set(homeUrl, {
