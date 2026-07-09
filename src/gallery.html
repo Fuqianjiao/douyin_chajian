@@ -85,19 +85,21 @@
           <h2 id="editorTitle">编辑资料</h2>
           <button id="editorClose" type="button">关闭</button>
         </div>
-        <label>
-          自定义标签
+        <div class="modal-section">
+          <div class="modal-section-head">
+            <span class="modal-section-title">自定义标签</span>
+            <span class="modal-section-hint">最多 6 个，至少保留 1 个 AI 标签</span>
+          </div>
           <div class="tag-editor">
             <input id="tagInput" type="text" maxlength="16" placeholder="输入标签，回车或点击添加">
             <button id="addTag" type="button">添加</button>
           </div>
-        </label>
-        <p id="tagHint" class="hint">AI 标签 + 自定义标签最多 6 个，至少保留 1 个 AI 标签。</p>
+        </div>
         <div id="editorTags" class="editor-tag-list tag-list" aria-label="当前已选标签"></div>
-        <div class="note-section">
-          <div class="note-section-head">
-            <span>备注</span>
-            <span class="hint">支持文本和图片，文本内容参与搜索</span>
+        <div class="modal-section">
+          <div class="modal-section-head">
+            <span class="modal-section-title">备注</span>
+            <span class="modal-section-hint">支持文本和图片，文本参与搜索</span>
           </div>
           <textarea id="noteText" rows="3" placeholder="记录值得学习的点、选题、脚本结构、风格等"></textarea>
           <div class="note-images">

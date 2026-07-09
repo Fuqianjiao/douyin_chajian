@@ -297,7 +297,7 @@ function renderCard(account) {
         </div>
         <div class="card-actions">
           <a class="open-link" href="${escapeHtml(account.homeUrl || "#")}" target="_blank" rel="noreferrer">打开主页</a>
-          <button class="note-button" data-edit="${escapeHtml(account.id)}">${hasNote(account) ? "查看备注" : "添加备注"}</button>
+          <button class="note-button" data-edit="${escapeHtml(account.id)}">添加备注/分类</button>
         </div>
       </div>
     </article>

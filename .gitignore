@@ -3,6 +3,7 @@ assets/
 data/
 outputs/
 work/
+backend-auto-login-extension/
 *.log
 .DS_Store
 node_modules/
