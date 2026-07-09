@@ -56,9 +56,37 @@ function openScreenshotDB() {
   });
 }
 
-async function saveScreenshotToDB(account, dataUrl, capturedAt) {
+function uniqueScreenshotKeys(account, extraUrls = []) {
+  return [...new Set([
+    profileKey(account?.homeUrl),
+    ...extraUrls.map(profileKey)
+  ].filter(Boolean))];
+}
+
+function requestToPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getScreenshotFromDB(account) {
+  const db = await openScreenshotDB();
+  const homeKey = profileKey(account?.homeUrl);
+  if (homeKey && db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+    const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
+    const shot = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).get(homeKey));
+    if (shot) return shot;
+  }
+  if (!account?.id) return null;
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  return await requestToPromise(tx.objectStore(SCREENSHOT_STORE).get(account.id));
+}
+
+async function saveScreenshotToDB(account, dataUrl, capturedAt, extraUrls = []) {
   const homeKey = profileKey(account?.homeUrl);
   if (!homeKey) throw new Error("缺少账号主页链接，无法绑定截图");
+  const homeKeys = uniqueScreenshotKeys(account, extraUrls);
   const db = await openScreenshotDB();
   const stores = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)
     ? [SCREENSHOT_STORE, SCREENSHOT_BY_URL_STORE]
@@ -72,13 +100,17 @@ async function saveScreenshotToDB(account, dataUrl, capturedAt) {
     capturedAt
   });
   if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
-    tx.objectStore(SCREENSHOT_BY_URL_STORE).put({
-      homeKey,
-      accountId: account.id,
-      homeUrl: account.homeUrl || "",
-      dataUrl,
-      capturedAt
-    });
+    const byUrl = tx.objectStore(SCREENSHOT_BY_URL_STORE);
+    for (const key of homeKeys) {
+      byUrl.put({
+        homeKey: key,
+        accountId: account.id,
+        canonicalHomeKey: homeKey,
+        homeUrl: account.homeUrl || "",
+        dataUrl,
+        capturedAt
+      });
+    }
   }
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -565,7 +597,15 @@ async function captureCurrentView() {
       matchedAccount.profileDetailSyncedAt = new Date().toISOString();
     }
     // 截图存 IndexedDB（关联到账号）
-    await saveScreenshotToDB(matchedAccount, response.shot.screenshotDataUrl, response.shot.capturedAt);
+    await saveScreenshotToDB(matchedAccount, response.shot.screenshotDataUrl, response.shot.capturedAt, [
+      profile.url,
+      response.shot.url,
+      tab.url
+    ]);
+    const verifiedShot = await getScreenshotFromDB(matchedAccount);
+    if (!verifiedShot?.dataUrl) {
+      throw new Error("截图已生成但未能按账号链接回读，绑定失败");
+    }
     matchedAccount._hasScreenshot = true;
     state.screenshotCount = await countScreenshotsInDB();
     await saveState();
@@ -581,7 +621,8 @@ async function captureCurrentView() {
   } else if (matchedAccount) {
     setStatus(`已截图并绑定「${matchedAccount.nickname}」，未读取到 signature。`, 100);
   } else {
-    setStatus("当前界面截图未匹配到已采集账号，截图仅绑定成功时才保存。", 100);
+    const key = profileKey(profile.url || tab.url) || "无链接 key";
+    setStatus(`当前界面未匹配到已采集账号（${key}），截图仅绑定成功时才保存。`, 100);
   }
 }
 

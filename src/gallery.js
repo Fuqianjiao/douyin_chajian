@@ -87,9 +87,17 @@ async function loadShotAccountIdSet() {
   return set.size;
 }
 
-async function saveShotToDB(account, dataUrl, capturedAt) {
+function uniqueShotKeys(account, extraUrls = []) {
+  return [...new Set([
+    shotKeyForAccount(account),
+    ...extraUrls.map(profileKey)
+  ].filter(Boolean))];
+}
+
+async function saveShotToDB(account, dataUrl, capturedAt, extraUrls = []) {
   const homeKey = shotKeyForAccount(account);
   if (!homeKey) throw new Error("缺少账号主页链接，无法绑定截图");
+  const homeKeys = uniqueShotKeys(account, extraUrls);
   const db = await openShotDB();
   const stores = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)
     ? [SCREENSHOT_STORE, SCREENSHOT_BY_URL_STORE]
@@ -103,18 +111,48 @@ async function saveShotToDB(account, dataUrl, capturedAt) {
     capturedAt
   });
   if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
-    tx.objectStore(SCREENSHOT_BY_URL_STORE).put({
-      homeKey,
-      accountId: account.id,
-      homeUrl: account.homeUrl || "",
-      dataUrl,
-      capturedAt
-    });
+    const byUrl = tx.objectStore(SCREENSHOT_BY_URL_STORE);
+    for (const key of homeKeys) {
+      byUrl.put({
+        homeKey: key,
+        accountId: account.id,
+        canonicalHomeKey: homeKey,
+        homeUrl: account.homeUrl || "",
+        dataUrl,
+        capturedAt
+      });
+    }
   }
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+}
+
+function waitForTabComplete(tabId, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (updatedTabId, info) => {
+      if (updatedTabId === tabId && info.status === "complete") done();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId, (current) => {
+      if (current?.status === "complete") done();
+    });
+    setTimeout(done, timeoutMs);
+  });
+}
+
+async function focusTabForCapture(tabId, windowId) {
+  await chrome.windows.update(windowId, { focused: true });
+  await chrome.tabs.update(tabId, { active: true });
+  await new Promise((resolve) => setTimeout(resolve, 500));
 }
 
 function normalizeText(value) {
@@ -920,28 +958,10 @@ function bindEvents() {
       try {
         // 1. 打开博主主页（激活标签，captureVisibleTab 只能截激活标签）
         tab = await chrome.tabs.create({ url: account.homeUrl, active: true });
-        await chrome.windows.update(tab.windowId, { focused: true });
+        await focusTabForCapture(tab.id, tab.windowId);
 
         // 2. 等待页面加载完成
-        await new Promise((resolve) => {
-          let settled = false;
-          const done = () => {
-            if (settled) return;
-            settled = true;
-            chrome.tabs.onUpdated.removeListener(listener);
-            resolve();
-          };
-          const listener = (tabId, info) => {
-            if (tabId === tab.id && info.status === "complete") {
-              done();
-            }
-          };
-          chrome.tabs.onUpdated.addListener(listener);
-          chrome.tabs.get(tab.id, (current) => {
-            if (current?.status === "complete") done();
-          });
-          setTimeout(done, 10000); // 超时兜底
-        });
+        await waitForTabComplete(tab.id, 10000);
         // 额外等待视觉渲染（激活标签需要渲染到屏幕才能截到）
         await new Promise((r) => setTimeout(r, 1500));
 
@@ -1003,9 +1023,7 @@ function bindEvents() {
         const profile = profileResult?.result || {};
 
         // 3.5 截图前确保标签是激活的（captureVisibleTab 只截激活标签）
-        await chrome.windows.update(tab.windowId, { focused: true });
-        await chrome.tabs.update(tab.id, { active: true });
-        await new Promise((r) => setTimeout(r, 500));
+        await focusTabForCapture(tab.id, tab.windowId);
 
         // 4. 截图（调用 background.js）
         const response = await chrome.runtime.sendMessage({
@@ -1016,11 +1034,19 @@ function bindEvents() {
         if (!response?.ok) throw new Error(response?.error || "截图失败");
 
         // 5. 存 IndexedDB + 更新内存缓存
-        await saveShotToDB(account, response.shot.screenshotDataUrl, response.shot.capturedAt);
+        await saveShotToDB(account, response.shot.screenshotDataUrl, response.shot.capturedAt, [
+          profile.url,
+          response.shot.url,
+          tab.url
+        ]);
+        const verifiedShot = await getShotFromDB(account);
+        if (!verifiedShot?.dataUrl) {
+          throw new Error("截图已生成但未能按账号链接回读，绑定失败");
+        }
         const shotKey = shotKeyForAccount(account);
         if (shotKey) state.shotAccountIdSet.add(shotKey);
         state.shotAccountIdSet.add(account.id);
-        state.shotCache.set(account.id, response.shot.screenshotDataUrl);
+        state.shotCache.set(account.id, verifiedShot.dataUrl);
 
         // 6. 同步 signature 到备注
         if (profile.profileDetail) {
