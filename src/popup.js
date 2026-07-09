@@ -389,12 +389,89 @@ async function collectWaterfall() {
 
 async function captureCurrentView() {
   const tab = await activeDouyinTab();
-  setStatus("正在读取主页详细介绍...", 25);
+  setStatus("正在读取主页 signature...", 25);
   const [profileResult] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: async () => {
+      const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+
+      function findSignature(obj) {
+        if (obj === null || obj === undefined) return "";
+        if (typeof obj === "string") {
+          try {
+            obj = JSON.parse(obj);
+          } catch {
+            return "";
+          }
+        }
+        if (typeof obj !== "object") return "";
+        if (Array.isArray(obj)) {
+          for (const item of obj) {
+            const found = findSignature(item);
+            if (found) return found;
+          }
+          return "";
+        }
+        if (obj.signature && typeof obj.signature === "string") {
+          return normalize(obj.signature).replace(/\\n/g, " ");
+        }
+        for (const key of Object.keys(obj)) {
+          const found = findSignature(obj[key]);
+          if (found) return found;
+        }
+        return "";
+      }
+
+      function extractSignatureFromScripts() {
+        const scripts = [...document.querySelectorAll("script")];
+        for (const script of scripts) {
+          const text = script.textContent || "";
+          if (!text.includes("signature")) continue;
+          try {
+            const parsed = JSON.parse(text);
+            const sig = findSignature(parsed);
+            if (sig) return sig;
+          } catch {}
+          const match = text.match(/"signature"\s*:\s*"([^"]{4,300})"/);
+          if (match) return normalize(match[1]).replace(/\\n/g, " ");
+        }
+        return "";
+      }
+
+      function extractSignatureFromRenderData() {
+        const el = document.getElementById("RENDER_DATA") || document.getElementById("SSR_HYDRATED_DATA");
+        if (el) {
+          try {
+            const text = decodeURIComponent(el.textContent || "");
+            return findSignature(JSON.parse(text));
+          } catch {}
+        }
+        return "";
+      }
+
+      // 优先从全局变量和页面数据取 signature
+      const globalCandidates = [
+        window.__INITIAL_STATE__,
+        window._SSR_HYDRATED_DATA,
+        window.__RENDER_DATA__,
+        window.__DATA__
+      ];
+      for (const data of globalCandidates) {
+        if (!data) continue;
+        const sig = findSignature(data);
+        if (sig) {
+          return { url: location.href, title: document.title, profileDetail: sig };
+        }
+      }
+
+      let sig = extractSignatureFromRenderData();
+      if (sig) return { url: location.href, title: document.title, profileDetail: sig };
+
+      sig = extractSignatureFromScripts();
+      if (sig) return { url: location.href, title: document.title, profileDetail: sig };
+
+      // Fallback: 通过页面点击「更多」获取（不依赖接口）
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const visible = (element) => {
         if (!element) return false;
         const rect = element.getBoundingClientRect();
@@ -441,11 +518,7 @@ async function captureCurrentView() {
         .filter((text) => text && text.length >= 4)
         .sort((a, b) => b.length - a.length)[0] || "";
 
-      return {
-        url: location.href,
-        title: document.title,
-        profileDetail: detail
-      };
+      return { url: location.href, title: document.title, profileDetail: detail };
     }
   });
   const profile = profileResult?.result || {};
@@ -453,12 +526,7 @@ async function captureCurrentView() {
   setStatus("正在截取当前抖音界面...", 55);
   const response = await chrome.runtime.sendMessage({
     type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
-    tab: {
-      id: tab.id,
-      windowId: tab.windowId,
-      title: tab.title,
-      url: tab.url
-    }
+    tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url }
   });
   if (!response?.ok) throw new Error(response?.error || "当前界面截图失败");
 
@@ -484,9 +552,9 @@ async function captureCurrentView() {
   await clearOldPageShots();
 
   if (matchedAccount && profile.profileDetail) {
-    setStatus(`已截图，绑定「${matchedAccount.nickname}」并同步主页介绍。`, 100);
+    setStatus(`已截图，绑定「${matchedAccount.nickname}」并同步 signature 到备注。`, 100);
   } else if (matchedAccount) {
-    setStatus(`已截图并绑定「${matchedAccount.nickname}」，未读取到更多介绍。`, 100);
+    setStatus(`已截图并绑定「${matchedAccount.nickname}」，未读取到 signature。`, 100);
   } else {
     setStatus("当前界面截图未匹配到已采集账号，截图仅绑定成功时才保存。", 100);
   }
