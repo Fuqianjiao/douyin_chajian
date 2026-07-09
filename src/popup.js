@@ -36,7 +36,8 @@ const MIN_TAGS_PER_ACCOUNT = 1;
 /* ─── IndexedDB: 截图存储（无大小限制） ─── */
 const SCREENSHOT_DB_NAME = "DouyinGalleryScreenshots";
 const SCREENSHOT_STORE = "shots";
-const SCREENSHOT_DB_VERSION = 1;
+const SCREENSHOT_BY_URL_STORE = "shotsByUrl";
+const SCREENSHOT_DB_VERSION = 2;
 
 function openScreenshotDB() {
   return new Promise((resolve, reject) => {
@@ -46,17 +47,39 @@ function openScreenshotDB() {
       if (!db.objectStoreNames.contains(SCREENSHOT_STORE)) {
         db.createObjectStore(SCREENSHOT_STORE, { keyPath: "accountId" });
       }
+      if (!db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+        db.createObjectStore(SCREENSHOT_BY_URL_STORE, { keyPath: "homeKey" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
-async function saveScreenshotToDB(accountId, dataUrl, capturedAt) {
+async function saveScreenshotToDB(account, dataUrl, capturedAt) {
+  const homeKey = profileKey(account?.homeUrl);
+  if (!homeKey) throw new Error("缺少账号主页链接，无法绑定截图");
   const db = await openScreenshotDB();
-  const tx = db.transaction(SCREENSHOT_STORE, "readwrite");
-  const store = tx.objectStore(SCREENSHOT_STORE);
-  store.put({ accountId, dataUrl, capturedAt });
+  const stores = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)
+    ? [SCREENSHOT_STORE, SCREENSHOT_BY_URL_STORE]
+    : [SCREENSHOT_STORE];
+  const tx = db.transaction(stores, "readwrite");
+  tx.objectStore(SCREENSHOT_STORE).put({
+    accountId: account.id,
+    homeKey,
+    homeUrl: account.homeUrl || "",
+    dataUrl,
+    capturedAt
+  });
+  if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+    tx.objectStore(SCREENSHOT_BY_URL_STORE).put({
+      homeKey,
+      accountId: account.id,
+      homeUrl: account.homeUrl || "",
+      dataUrl,
+      capturedAt
+    });
+  }
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -65,8 +88,9 @@ async function saveScreenshotToDB(accountId, dataUrl, capturedAt) {
 
 async function countScreenshotsInDB() {
   const db = await openScreenshotDB();
-  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
-  const store = tx.objectStore(SCREENSHOT_STORE);
+  const storeName = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE) ? SCREENSHOT_BY_URL_STORE : SCREENSHOT_STORE;
+  const tx = db.transaction(storeName, "readonly");
+  const store = tx.objectStore(storeName);
   const request = store.count();
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -76,8 +100,9 @@ async function countScreenshotsInDB() {
 
 async function getAllScreenshotsFromDB() {
   const db = await openScreenshotDB();
-  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
-  const store = tx.objectStore(SCREENSHOT_STORE);
+  const storeName = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE) ? SCREENSHOT_BY_URL_STORE : SCREENSHOT_STORE;
+  const tx = db.transaction(storeName, "readonly");
+  const store = tx.objectStore(storeName);
   const request = store.getAll();
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -540,7 +565,7 @@ async function captureCurrentView() {
       matchedAccount.profileDetailSyncedAt = new Date().toISOString();
     }
     // 截图存 IndexedDB（关联到账号）
-    await saveScreenshotToDB(matchedAccount.id, response.shot.screenshotDataUrl, response.shot.capturedAt);
+    await saveScreenshotToDB(matchedAccount, response.shot.screenshotDataUrl, response.shot.capturedAt);
     matchedAccount._hasScreenshot = true;
     state.screenshotCount = await countScreenshotsInDB();
     await saveState();
@@ -573,7 +598,11 @@ async function galleryHtml() {
   const groups = groupedAccounts();
   const nav = [...groups.entries()].map(([name, accounts]) => `<button data-filter="${escapeHtml(name)}">${escapeHtml(name)} <b>${accounts.length}</b></button>`).join("");
   const screenshots = await getAllScreenshotsFromDB();
-  const shotMap = new Map(screenshots.map((s) => [s.accountId, s]));
+  const shotMap = new Map();
+  for (const shot of screenshots) {
+    if (shot.homeKey) shotMap.set(shot.homeKey, shot);
+    if (shot.accountId) shotMap.set(shot.accountId, shot);
+  }
   const sections = [...groups.entries()].map(([name, accounts]) => `
     <section class="folder" data-folder="${escapeHtml(name)}">
       <div class="folder-head">
@@ -583,7 +612,7 @@ async function galleryHtml() {
       <div class="grid">
         ${accounts.map((account) => `
     <article class="card" data-category="${escapeHtml(name)}">
-      <img class="shot" src="${escapeHtml(shotMap.get(account.id)?.dataUrl || account.avatar || "")}" alt="${escapeHtml(account.nickname)}" />
+      <img class="shot" src="${escapeHtml(shotMap.get(profileKey(account.homeUrl))?.dataUrl || shotMap.get(account.id)?.dataUrl || account.avatar || "")}" alt="${escapeHtml(account.nickname)}" />
       <div class="body">
         <img class="avatar" src="${escapeHtml(account.avatar)}" alt="" />
         <div>

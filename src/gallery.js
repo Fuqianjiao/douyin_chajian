@@ -4,7 +4,8 @@ const MIN_AI_TAGS = 1;
 /* ─── IndexedDB: 截图存储 ─── */
 const SCREENSHOT_DB_NAME = "DouyinGalleryScreenshots";
 const SCREENSHOT_STORE = "shots";
-const SCREENSHOT_DB_VERSION = 1;
+const SCREENSHOT_BY_URL_STORE = "shotsByUrl";
+const SCREENSHOT_DB_VERSION = 2;
 
 function openShotDB() {
   return new Promise((resolve, reject) => {
@@ -14,27 +15,56 @@ function openShotDB() {
       if (!db.objectStoreNames.contains(SCREENSHOT_STORE)) {
         db.createObjectStore(SCREENSHOT_STORE, { keyPath: "accountId" });
       }
+      if (!db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+        db.createObjectStore(SCREENSHOT_BY_URL_STORE, { keyPath: "homeKey" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
-async function getShotFromDB(accountId) {
-  const db = await openShotDB();
-  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
-  const store = tx.objectStore(SCREENSHOT_STORE);
-  const request = store.get(accountId);
+function profileKey(url) {
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/\/user\/[^/?#]+/i);
+    return match ? match[0].toLowerCase() : "";
+  } catch {
+    const match = String(url || "").match(/\/user\/[^/?#]+/i);
+    return match ? match[0].toLowerCase() : "";
+  }
+}
+
+function shotKeyForAccount(account) {
+  return profileKey(account?.homeUrl) || account?.id || "";
+}
+
+function requestToPromise(request) {
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result || null);
+    request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
+async function getShotFromDB(account) {
+  const db = await openShotDB();
+  const homeKey = shotKeyForAccount(account);
+  if (homeKey && db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+    const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
+    const shot = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).get(homeKey));
+    if (shot) return shot;
+  }
+  if (!account?.id) return null;
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  const shot = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).get(account.id));
+  return shot || null;
+}
+
 async function countShotsInDB() {
   const db = await openShotDB();
-  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
-  const store = tx.objectStore(SCREENSHOT_STORE);
+  const storeName = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE) ? SCREENSHOT_BY_URL_STORE : SCREENSHOT_STORE;
+  const tx = db.transaction(storeName, "readonly");
+  const store = tx.objectStore(storeName);
   const request = store.count();
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -44,24 +74,43 @@ async function countShotsInDB() {
 
 async function loadShotAccountIdSet() {
   const db = await openShotDB();
+  const set = new Set();
+  if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+    const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
+    const keys = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).getAllKeys());
+    for (const key of keys || []) set.add(key);
+  }
   const tx = db.transaction(SCREENSHOT_STORE, "readonly");
-  const store = tx.objectStore(SCREENSHOT_STORE);
-  const request = store.getAllKeys();
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => {
-      const keys = request.result || [];
-      state.shotAccountIdSet = new Set(keys);
-      resolve(keys.length);
-    };
-    request.onerror = () => reject(request.error);
-  });
+  const keys = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).getAllKeys());
+  for (const key of keys || []) set.add(key);
+  state.shotAccountIdSet = set;
+  return set.size;
 }
 
-async function saveShotToDB(accountId, dataUrl, capturedAt) {
+async function saveShotToDB(account, dataUrl, capturedAt) {
+  const homeKey = shotKeyForAccount(account);
+  if (!homeKey) throw new Error("缺少账号主页链接，无法绑定截图");
   const db = await openShotDB();
-  const tx = db.transaction(SCREENSHOT_STORE, "readwrite");
-  const store = tx.objectStore(SCREENSHOT_STORE);
-  store.put({ accountId, dataUrl, capturedAt });
+  const stores = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)
+    ? [SCREENSHOT_STORE, SCREENSHOT_BY_URL_STORE]
+    : [SCREENSHOT_STORE];
+  const tx = db.transaction(stores, "readwrite");
+  tx.objectStore(SCREENSHOT_STORE).put({
+    accountId: account.id,
+    homeKey,
+    homeUrl: account.homeUrl || "",
+    dataUrl,
+    capturedAt
+  });
+  if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+    tx.objectStore(SCREENSHOT_BY_URL_STORE).put({
+      homeKey,
+      accountId: account.id,
+      homeUrl: account.homeUrl || "",
+      dataUrl,
+      capturedAt
+    });
+  }
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -255,6 +304,11 @@ function shotFor(accountId) {
   return state.shotCache.get(accountId) || "";
 }
 
+function hasShotForAccount(account) {
+  const key = shotKeyForAccount(account);
+  return Boolean(key && state.shotAccountIdSet.has(key)) || Boolean(account?.id && state.shotAccountIdSet.has(account.id));
+}
+
 /* ─── 懒加载截图：IntersectionObserver ─── */
 function lazyLoadShots() {
   // 先断开旧 observer
@@ -266,13 +320,14 @@ function lazyLoadShots() {
       if (!entry.isIntersecting) continue;
       const placeholder = entry.target;
       const accountId = placeholder.dataset.shotId;
-      if (!accountId) continue;
+      const account = state.accounts.find((item) => item.id === accountId);
+      if (!account) continue;
       // 停止观察这个元素
       state.shotObserver.unobserve(placeholder);
       // 从 IndexedDB 加载截图
-      getShotFromDB(accountId).then((shot) => {
+      getShotFromDB(account).then((shot) => {
         if (shot?.dataUrl) {
-          state.shotCache.set(accountId, shot.dataUrl);
+          state.shotCache.set(account.id, shot.dataUrl);
           const parent = placeholder.closest(".shot");
           if (parent) {
             const img = document.createElement("img");
@@ -317,8 +372,8 @@ function matchFilters(account) {
     const names = ensureTags(account).map((t) => t.name);
     if (!names.includes(state.tagFilter)) return false;
   }
-  if (state.screenshotFilter === "with" && !state.shotAccountIdSet.has(account.id)) return false;
-  if (state.screenshotFilter === "missing" && state.shotAccountIdSet.has(account.id)) return false;
+  if (state.screenshotFilter === "with" && !hasShotForAccount(account)) return false;
+  if (state.screenshotFilter === "missing" && hasShotForAccount(account)) return false;
   if (state.noteFilter === "with" && !hasNote(account)) return false;
   if (state.noteFilter === "missing" && hasNote(account)) return false;
   if (state.noteKeyword) {
@@ -397,7 +452,7 @@ function renderContent() {
 
 function renderCard(account) {
   account = cleanAccountIdentity(account);
-  const hasShot = state.shotAccountIdSet.has(account.id);
+  const hasShot = hasShotForAccount(account);
   const cachedShot = shotFor(account.id);
   const tags = ensureTags(account);
   const isSelected = state.batchSelected.has(account.id);
@@ -839,7 +894,7 @@ function bindEvents() {
     els.autoShot.disabled = true;
     els.stopShot.disabled = false;
 
-    const missing = state.accounts.filter((a) => a.homeUrl && !state.shotAccountIdSet.has(a.id));
+    const missing = state.accounts.filter((a) => a.homeUrl && !hasShotForAccount(a));
     if (missing.length === 0) {
       addLog("没有缺失截图的账号，全部已绑定", "success");
       els.captureStatus.textContent = "";
@@ -863,22 +918,32 @@ function bindEvents() {
 
       let tab = null;
       try {
-        // 1. 打开博主主页（后台标签，不激活）
-        tab = await chrome.tabs.create({ url: account.homeUrl, active: false });
+        // 1. 打开博主主页（激活标签，captureVisibleTab 只能截激活标签）
+        tab = await chrome.tabs.create({ url: account.homeUrl, active: true });
+        await chrome.windows.update(tab.windowId, { focused: true });
 
         // 2. 等待页面加载完成
         await new Promise((resolve) => {
+          let settled = false;
+          const done = () => {
+            if (settled) return;
+            settled = true;
+            chrome.tabs.onUpdated.removeListener(listener);
+            resolve();
+          };
           const listener = (tabId, info) => {
             if (tabId === tab.id && info.status === "complete") {
-              chrome.tabs.onUpdated.removeListener(listener);
-              resolve();
+              done();
             }
           };
           chrome.tabs.onUpdated.addListener(listener);
-          setTimeout(resolve, 8000); // 超时兜底
+          chrome.tabs.get(tab.id, (current) => {
+            if (current?.status === "complete") done();
+          });
+          setTimeout(done, 10000); // 超时兜底
         });
-        // 额外等待渲染
-        await new Promise((r) => setTimeout(r, 1200));
+        // 额外等待视觉渲染（激活标签需要渲染到屏幕才能截到）
+        await new Promise((r) => setTimeout(r, 1500));
 
         // 3. 提取 signature（不点击「更多」按钮）
         const [profileResult] = await chrome.scripting.executeScript({
@@ -937,6 +1002,11 @@ function bindEvents() {
         });
         const profile = profileResult?.result || {};
 
+        // 3.5 截图前确保标签是激活的（captureVisibleTab 只截激活标签）
+        await chrome.windows.update(tab.windowId, { focused: true });
+        await chrome.tabs.update(tab.id, { active: true });
+        await new Promise((r) => setTimeout(r, 500));
+
         // 4. 截图（调用 background.js）
         const response = await chrome.runtime.sendMessage({
           type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
@@ -946,7 +1016,9 @@ function bindEvents() {
         if (!response?.ok) throw new Error(response?.error || "截图失败");
 
         // 5. 存 IndexedDB + 更新内存缓存
-        await saveShotToDB(account.id, response.shot.screenshotDataUrl, response.shot.capturedAt);
+        await saveShotToDB(account, response.shot.screenshotDataUrl, response.shot.capturedAt);
+        const shotKey = shotKeyForAccount(account);
+        if (shotKey) state.shotAccountIdSet.add(shotKey);
         state.shotAccountIdSet.add(account.id);
         state.shotCache.set(account.id, response.shot.screenshotDataUrl);
 
