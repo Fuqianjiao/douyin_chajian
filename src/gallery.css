@@ -307,9 +307,8 @@ textarea {
 }
 
 .gallery {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 16px;
+  columns: 2 260px;
+  column-gap: 16px;
 }
 
 .card {
@@ -318,6 +317,8 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
+  break-inside: avoid;
+  margin-bottom: 16px;
 }
 
 .card.batch-selected {
@@ -422,6 +423,14 @@ textarea {
 @keyframes skeleton-shimmer {
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }
+}
+
+.shot-empty {
+  display: grid;
+  place-items: center;
+  color: var(--muted-2);
+  font-size: 12px;
+  background: #0b0c0f;
 }
 
 .body {

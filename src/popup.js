@@ -1,6 +1,6 @@
 const state = {
   accounts: [],
-  pageShots: [],
+  screenshotCount: 0,
   lastRunAdded: 0,
   config: null
 };
@@ -32,6 +32,62 @@ function escapeHtml(value) {
 const SELF_URL_PATTERN = /\/user\/self(\b|[/?#])/i;
 const MAX_TAGS_PER_ACCOUNT = 6;
 const MIN_TAGS_PER_ACCOUNT = 1;
+
+/* ─── IndexedDB: 截图存储（无大小限制） ─── */
+const SCREENSHOT_DB_NAME = "DouyinGalleryScreenshots";
+const SCREENSHOT_STORE = "shots";
+const SCREENSHOT_DB_VERSION = 1;
+
+function openScreenshotDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(SCREENSHOT_DB_NAME, SCREENSHOT_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SCREENSHOT_STORE)) {
+        db.createObjectStore(SCREENSHOT_STORE, { keyPath: "accountId" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveScreenshotToDB(accountId, dataUrl, capturedAt) {
+  const db = await openScreenshotDB();
+  const tx = db.transaction(SCREENSHOT_STORE, "readwrite");
+  const store = tx.objectStore(SCREENSHOT_STORE);
+  store.put({ accountId, dataUrl, capturedAt });
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function countScreenshotsInDB() {
+  const db = await openScreenshotDB();
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  const store = tx.objectStore(SCREENSHOT_STORE);
+  const request = store.count();
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getAllScreenshotsFromDB() {
+  const db = await openScreenshotDB();
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  const store = tx.objectStore(SCREENSHOT_STORE);
+  const request = store.getAll();
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function clearOldPageShots() {
+  await chrome.storage.local.remove("pageShots");
+}
 
 function normalizeAccountText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -196,11 +252,13 @@ async function loadConfig() {
 }
 
 async function loadState() {
-  const stored = await chrome.storage.local.get(["accounts", "pageShots", "lastRunAdded"]);
+  const stored = await chrome.storage.local.get(["accounts", "lastRunAdded"]);
   const originalAccountsJson = JSON.stringify(stored.accounts || []);
   state.accounts = applyCategories(stored.accounts || []);
-  state.pageShots = stored.pageShots || [];
   state.lastRunAdded = Number(stored.lastRunAdded || 0);
+  state.screenshotCount = await countScreenshotsInDB();
+  // 清零旧 pageShots 数据（一次性清理）
+  await clearOldPageShots();
   if (originalAccountsJson !== JSON.stringify(state.accounts)) {
     await chrome.storage.local.set({ accounts: state.accounts });
   }
@@ -210,7 +268,6 @@ async function loadState() {
 async function saveState() {
   await chrome.storage.local.set({
     accounts: state.accounts,
-    pageShots: state.pageShots,
     lastRunAdded: state.lastRunAdded
   });
   render();
@@ -218,7 +275,6 @@ async function saveState() {
 
 function render() {
   const total = state.accounts.length;
-  const screenshots = state.pageShots.length;
   els.summary.textContent = "打开抖音关注弹窗后开始采集。";
 
   const grouped = new Map();
@@ -232,8 +288,8 @@ function render() {
       <span>已采集账号</span>
     </article>
     <article class="stat-card">
-      <strong>${screenshots}</strong>
-      <span>已缓存截图</span>
+      <strong>${state.screenshotCount}</strong>
+      <span>已绑定截图</span>
     </article>
   `;
 }
@@ -415,15 +471,24 @@ async function captureCurrentView() {
       matchedAccount.profileDetail = profile.profileDetail;
       matchedAccount.profileDetailSyncedAt = new Date().toISOString();
     }
-  }
-  state.pageShots = [response.shot, ...state.pageShots].slice(0, 12);
-  await saveState();
-  if (matchedAccount && profile.profileDetail) {
-    setStatus(`已截图，并同步「${matchedAccount.nickname}」主页介绍到备注。`, 100);
-  } else if (matchedAccount) {
-    setStatus(`已截图并关联「${matchedAccount.nickname}」，未读取到更多介绍。`, 100);
+    // 截图存 IndexedDB（关联到账号）
+    await saveScreenshotToDB(matchedAccount.id, response.shot.screenshotDataUrl, response.shot.capturedAt);
+    matchedAccount._hasScreenshot = true;
+    state.screenshotCount = await countScreenshotsInDB();
+    await saveState();
   } else {
-    setStatus("当前界面截图已保存，未匹配到已采集账号。", 100);
+    // 未关联账号 → 不存截图（截图只绑定到已有账号才有效）
+    state.screenshotCount = await countScreenshotsInDB();
+  }
+  // 清零旧 pageShots 数据
+  await clearOldPageShots();
+
+  if (matchedAccount && profile.profileDetail) {
+    setStatus(`已截图，绑定「${matchedAccount.nickname}」并同步主页介绍。`, 100);
+  } else if (matchedAccount) {
+    setStatus(`已截图并绑定「${matchedAccount.nickname}」，未读取到更多介绍。`, 100);
+  } else {
+    setStatus("当前界面截图未匹配到已采集账号，截图仅绑定成功时才保存。", 100);
   }
 }
 
@@ -436,19 +501,11 @@ function groupedAccounts() {
   return groups;
 }
 
-function galleryHtml() {
+async function galleryHtml() {
   const groups = groupedAccounts();
   const nav = [...groups.entries()].map(([name, accounts]) => `<button data-filter="${escapeHtml(name)}">${escapeHtml(name)} <b>${accounts.length}</b></button>`).join("");
-  const pageShots = state.pageShots.map((shot) => `
-    <article class="screen-card">
-      <img src="${escapeHtml(shot.previewDataUrl || shot.screenshotPath)}" alt="${escapeHtml(shot.title)}" />
-      <div>
-        <h3>${escapeHtml(shot.title)}</h3>
-        <p>${escapeHtml(new Date(shot.capturedAt).toLocaleString("zh-CN"))}</p>
-        <a href="${escapeHtml(shot.url)}" target="_blank" rel="noreferrer">打开来源页面</a>
-      </div>
-    </article>
-  `).join("");
+  const screenshots = await getAllScreenshotsFromDB();
+  const shotMap = new Map(screenshots.map((s) => [s.accountId, s]));
   const sections = [...groups.entries()].map(([name, accounts]) => `
     <section class="folder" data-folder="${escapeHtml(name)}">
       <div class="folder-head">
@@ -458,7 +515,7 @@ function galleryHtml() {
       <div class="grid">
         ${accounts.map((account) => `
     <article class="card" data-category="${escapeHtml(name)}">
-      <img class="shot" src="${escapeHtml(account.screenshotPath || account.avatar || "")}" alt="${escapeHtml(account.nickname)}" />
+      <img class="shot" src="${escapeHtml(shotMap.get(account.id)?.dataUrl || account.avatar || "")}" alt="${escapeHtml(account.nickname)}" />
       <div class="body">
         <img class="avatar" src="${escapeHtml(account.avatar)}" alt="" />
         <div>
@@ -490,8 +547,6 @@ function galleryHtml() {
     h1{margin:0 0 8px;font-size:30px;line-height:1.1}p{color:var(--muted);font-size:14px;line-height:1.5}.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
     button{border:1px solid var(--line);background:#20232d;color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:800;cursor:pointer}button.active{border-color:var(--cyan);color:var(--cyan)}
     .folder{margin-bottom:24px}.folder-head{display:flex;justify-content:space-between;align-items:end;margin:0 0 12px}.folder-head h2{margin:0;font-size:20px}.folder-head span{color:var(--muted);font-size:13px}
-    .screens{margin-bottom:22px}.screen-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}.screen-card{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
-    .screen-card img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;background:#252832}.screen-card div{padding:12px}.screen-card h3{margin:0 0 6px;font-size:16px}
     .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.card{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
     .shot{width:100%;aspect-ratio:16/10;object-fit:cover;background:#252832}.body{display:grid;grid-template-columns:44px 1fr;gap:10px;padding:12px}.avatar{width:44px;height:44px;border-radius:50%;object-fit:cover}
     h3{margin:0 0 6px;font-size:16px}.body p{margin:0}.body span{display:inline-block;margin-top:8px;color:var(--cyan);font-size:13px;font-weight:800}
@@ -504,16 +559,9 @@ function galleryHtml() {
     <header>
       <div>
         <h1>起号学习离线画廊</h1>
-        <p>本地采集 ${state.accounts.length} 个账号，已保存 ${state.pageShots.length} 张界面截图。</p>
+        <p>本地采集 ${state.accounts.length} 个账号，${state.screenshotCount} 张已绑定截图。</p>
       </div>
     </header>
-    <section class="screens">
-      <div class="folder-head">
-        <h2>界面截图</h2>
-        <span>${state.pageShots.length} 张截图</span>
-      </div>
-      <div class="screen-grid">${pageShots || "<p>暂无界面截图</p>"}</div>
-    </section>
     <nav class="filters"><button class="active" data-filter="全部">全部 <b>${state.accounts.length}</b></button>${nav}</nav>
     ${sections}
   </main>
@@ -545,10 +593,11 @@ async function downloadText(filename, text, mime) {
 }
 
 async function exportJson() {
+  const screenshots = await getAllScreenshotsFromDB();
   await downloadText("data/gallery/accounts.json", JSON.stringify({
     exportedAt: new Date().toISOString(),
     config: state.config,
-    pageShots: state.pageShots,
+    screenshots,
     accounts: state.accounts
   }, null, 2), "application/json");
 }
@@ -560,7 +609,6 @@ async function exportGallery() {
 async function openOfflineGallery() {
   await chrome.storage.local.set({
     accounts: state.accounts,
-    pageShots: state.pageShots,
     config: state.config,
     gallerySyncedAt: new Date().toISOString()
   });
@@ -597,10 +645,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (changes.accounts?.newValue) {
     state.accounts = applyCategories(changes.accounts.newValue);
-    render();
-  }
-  if (changes.pageShots?.newValue) {
-    state.pageShots = changes.pageShots.newValue;
     render();
   }
   if (changes.lastRunAdded?.newValue !== undefined) {

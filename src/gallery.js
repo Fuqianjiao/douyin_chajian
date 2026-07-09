@@ -1,6 +1,62 @@
 const MAX_TAGS = 6;
 const MIN_AI_TAGS = 1;
 
+/* ─── IndexedDB: 截图存储 ─── */
+const SCREENSHOT_DB_NAME = "DouyinGalleryScreenshots";
+const SCREENSHOT_STORE = "shots";
+const SCREENSHOT_DB_VERSION = 1;
+
+function openShotDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(SCREENSHOT_DB_NAME, SCREENSHOT_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SCREENSHOT_STORE)) {
+        db.createObjectStore(SCREENSHOT_STORE, { keyPath: "accountId" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getShotFromDB(accountId) {
+  const db = await openShotDB();
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  const store = tx.objectStore(SCREENSHOT_STORE);
+  const request = store.get(accountId);
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function countShotsInDB() {
+  const db = await openShotDB();
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  const store = tx.objectStore(SCREENSHOT_STORE);
+  const request = store.count();
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function loadShotAccountIdSet() {
+  const db = await openShotDB();
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  const store = tx.objectStore(SCREENSHOT_STORE);
+  const request = store.getAllKeys();
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => {
+      const keys = request.result || [];
+      state.shotAccountIdSet = new Set(keys);
+      resolve(keys.length);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
 const els = {
   meta: document.querySelector("#meta"),
   nameSearch: document.querySelector("#nameSearch"),
@@ -52,7 +108,9 @@ const els = {
 
 const state = {
   accounts: [],
-  pageShots: [],
+  shotCache: new Map(),
+  shotAccountIdSet: new Set(),
+  shotObserver: null,
   folder: "全部",
   searchKeyword: "",
   tagFilter: "",
@@ -165,8 +223,52 @@ function allTagNames() {
 }
 
 function shotFor(accountId) {
-  const shot = state.pageShots.find((s) => s.accountId === accountId);
-  return shot ? (shot.previewDataUrl || shot.screenshotPath || "") : "";
+  return state.shotCache.get(accountId) || "";
+}
+
+/* ─── 懒加载截图：IntersectionObserver ─── */
+function lazyLoadShots() {
+  // 先断开旧 observer
+  if (state.shotObserver) {
+    state.shotObserver.disconnect();
+  }
+  state.shotObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const placeholder = entry.target;
+      const accountId = placeholder.dataset.shotId;
+      if (!accountId) continue;
+      // 停止观察这个元素
+      state.shotObserver.unobserve(placeholder);
+      // 从 IndexedDB 加载截图
+      getShotFromDB(accountId).then((shot) => {
+        if (shot?.dataUrl) {
+          state.shotCache.set(accountId, shot.dataUrl);
+          const parent = placeholder.closest(".shot");
+          if (parent) {
+            const img = document.createElement("img");
+            img.src = shot.dataUrl;
+            img.alt = parent.closest(".card")?.querySelector(".nickname")?.textContent || "";
+            img.style.opacity = "0";
+            img.style.transition = "opacity 0.3s";
+            img.onload = () => { img.style.opacity = "1"; };
+            parent.innerHTML = "";
+            parent.appendChild(img);
+          }
+        } else {
+          placeholder.textContent = "暂无截图";
+          placeholder.classList.add("shot-empty");
+        }
+      }).catch(() => {
+        placeholder.textContent = "暂无截图";
+        placeholder.classList.add("shot-empty");
+      });
+    }
+  }, { rootMargin: "200px 0px", threshold: 0.01 });
+  // 观察所有需要懒加载的 placeholder
+  els.content.querySelectorAll(".shot-placeholder[data-shot-id]").forEach((el) => {
+    state.shotObserver.observe(el);
+  });
 }
 
 function hasNote(account) {
@@ -186,8 +288,8 @@ function matchFilters(account) {
     const names = ensureTags(account).map((t) => t.name);
     if (!names.includes(state.tagFilter)) return false;
   }
-  if (state.screenshotFilter === "with" && !shotFor(account.id)) return false;
-  if (state.screenshotFilter === "missing" && shotFor(account.id)) return false;
+  if (state.screenshotFilter === "with" && !state.shotAccountIdSet.has(account.id)) return false;
+  if (state.screenshotFilter === "missing" && state.shotAccountIdSet.has(account.id)) return false;
   if (state.noteFilter === "with" && !hasNote(account)) return false;
   if (state.noteFilter === "missing" && hasNote(account)) return false;
   if (state.noteKeyword) {
@@ -261,13 +363,20 @@ function renderContent() {
 
   bindCardEvents();
   updateBatchCount();
+  lazyLoadShots();
 }
 
 function renderCard(account) {
   account = cleanAccountIdentity(account);
-  const shot = shotFor(account.id);
+  const hasShot = state.shotAccountIdSet.has(account.id);
+  const cachedShot = shotFor(account.id);
   const tags = ensureTags(account);
   const isSelected = state.batchSelected.has(account.id);
+  const shotHtml = cachedShot
+    ? `<img src="${escapeHtml(cachedShot)}" alt="${escapeHtml(account.nickname)}">`
+    : hasShot
+      ? `<div class="shot-placeholder" data-shot-id="${escapeHtml(account.id)}">截图加载中...</div>`
+      : `<span class="shot-empty">暂无截图</span>`;
   return `
     <article class="card ${isSelected ? "batch-selected" : ""}" data-id="${escapeHtml(account.id)}">
       ${state.batchMode ? `
@@ -278,7 +387,7 @@ function renderCard(account) {
       ` : ""}
       <button class="delete-card" data-delete="${escapeHtml(account.id)}" title="删除此账号">×</button>
       <a class="shot" href="${escapeHtml(account.homeUrl || "#")}" target="_blank" rel="noreferrer">
-        ${shot ? `<img src="${escapeHtml(shot)}" alt="${escapeHtml(account.nickname)}">` : `<span>暂无截图</span>`}
+        ${shotHtml}
       </a>
       <div class="body">
         <div class="profile">
@@ -625,9 +734,10 @@ async function persist() {
   updateMeta();
 }
 
-function updateMeta() {
+async function updateMeta() {
   const tagCount = allTagNames().length;
-  els.meta.textContent = `本地已采集 ${state.accounts.length} 个账号，共 ${tagCount} 个不同标签。`;
+  const shotCount = await countShotsInDB();
+  els.meta.textContent = `已采集 ${state.accounts.length} 个账号 · ${tagCount} 个标签 · ${shotCount} 张已绑定截图`;
 }
 
 function resetFilters() {
@@ -738,7 +848,7 @@ function bindEvents() {
   });
 
   els.export.addEventListener("click", () => {
-    const data = JSON.stringify({ accounts: state.accounts, pageShots: state.pageShots }, null, 2);
+    const data = JSON.stringify({ accounts: state.accounts }, null, 2);
     const blob = new Blob([data], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -771,7 +881,9 @@ function bindEvents() {
 
 (async function init() {
   bindEvents();
-  const stored = await chrome.storage.local.get(["accounts", "pageShots"]);
+  const stored = await chrome.storage.local.get(["accounts"]);
+  // 清零旧 pageShots 数据（一次性）
+  await chrome.storage.local.remove("pageShots");
   const originalAccountsJson = JSON.stringify(stored.accounts || []);
   state.accounts = (stored.accounts || []).map((a) => {
     const clean = cleanAccountIdentity(a);
@@ -780,7 +892,8 @@ function bindEvents() {
   if (originalAccountsJson !== JSON.stringify(state.accounts)) {
     await chrome.storage.local.set({ accounts: state.accounts });
   }
-  state.pageShots = stored.pageShots || [];
+  // 加载截图 accountId 列表（轻量，只读 key 不读图片数据）
+  await loadShotAccountIdSet();
   renderTagFilterOptions();
   renderBatchTags();
   renderFolders();
