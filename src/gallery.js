@@ -57,6 +57,34 @@ async function loadShotAccountIdSet() {
   });
 }
 
+async function saveShotToDB(accountId, dataUrl, capturedAt) {
+  const db = await openShotDB();
+  const tx = db.transaction(SCREENSHOT_STORE, "readwrite");
+  const store = tx.objectStore(SCREENSHOT_STORE);
+  store.put({ accountId, dataUrl, capturedAt });
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function normalizeText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function upsertProfileNote(existingNote, profileDetail) {
+  const detail = normalizeText(profileDetail);
+  if (!detail) return existingNote || "";
+  const marker = "【主页详细介绍】";
+  const block = `${marker}\n${detail}`;
+  const note = String(existingNote || "").trim();
+  if (!note) return block;
+  if (note.includes(marker)) {
+    return note.replace(new RegExp(`\\n*${marker}[\\s\\S]*$`), `\n\n${block}`).trim();
+  }
+  return `${note}\n\n${block}`;
+}
+
 const els = {
   meta: document.querySelector("#meta"),
   nameSearch: document.querySelector("#nameSearch"),
@@ -111,6 +139,7 @@ const state = {
   shotCache: new Map(),
   shotAccountIdSet: new Set(),
   shotObserver: null,
+  autoShotRunning: false,
   folder: "全部",
   searchKeyword: "",
   tagFilter: "",
@@ -805,39 +834,160 @@ function bindEvents() {
   els.batchDelete.addEventListener("click", batchDeleteAccounts);
 
   els.autoShot.addEventListener("click", async () => {
+    if (state.autoShotRunning) return;
+    state.autoShotRunning = true;
     els.autoShot.disabled = true;
     els.stopShot.disabled = false;
-    addLog("开始补缺失截图", "info");
-    els.captureStatus.textContent = "正在补缺失截图...";
-    try {
-      const missing = state.accounts.filter((a) => !shotFor(a.id));
-      addLog(`共 ${missing.length} 个账号需要补图`, "info");
-      for (const account of missing.slice(0, 20)) {
-        if (!account.homeUrl) continue;
-        const created = await chrome.tabs.create({ url: account.homeUrl, active: false });
-        await new Promise((r) => setTimeout(r, 1800));
-        try {
-          const result = await chrome.scripting.executeScript({
-            target: { tabId: created.id },
-            func: () => ({ url: location.href, title: document.title })
-          });
-          addLog(`已访问：${result?.[0]?.result?.title || account.nickname}`, "success");
-        } catch (err) {
-          addLog(`访问失败：${account.nickname} ${err.message || err}`, "failure");
-        }
-        await chrome.tabs.remove(created.id);
-      }
-    } catch (err) {
-      addLog(`补图失败：${err.message || err}`, "failure");
-    } finally {
+
+    const missing = state.accounts.filter((a) => a.homeUrl && !state.shotAccountIdSet.has(a.id));
+    if (missing.length === 0) {
+      addLog("没有缺失截图的账号，全部已绑定", "success");
+      els.captureStatus.textContent = "";
+      state.autoShotRunning = false;
       els.autoShot.disabled = false;
       els.stopShot.disabled = true;
-      els.captureStatus.textContent = "";
+      return;
     }
+
+    addLog(`开始补缺失截图，共 ${missing.length} 个账号`, "info");
+    let done = 0;
+    let failed = 0;
+
+    for (let i = 0; i < missing.length; i++) {
+      if (!state.autoShotRunning) {
+        addLog(`用户已停止，已完成 ${done}/${missing.length}`, "info");
+        break;
+      }
+      const account = missing[i];
+      els.captureStatus.textContent = `补图中 ${i + 1}/${missing.length}：${account.nickname}`;
+
+      let tab = null;
+      try {
+        // 1. 打开博主主页（后台标签，不激活）
+        tab = await chrome.tabs.create({ url: account.homeUrl, active: false });
+
+        // 2. 等待页面加载完成
+        await new Promise((resolve) => {
+          const listener = (tabId, info) => {
+            if (tabId === tab.id && info.status === "complete") {
+              chrome.tabs.onUpdated.removeListener(listener);
+              resolve();
+            }
+          };
+          chrome.tabs.onUpdated.addListener(listener);
+          setTimeout(resolve, 8000); // 超时兜底
+        });
+        // 额外等待渲染
+        await new Promise((r) => setTimeout(r, 1200));
+
+        // 3. 提取 signature（不点击「更多」按钮）
+        const [profileResult] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const normalize = (v) => String(v || "").replace(/\s+/g, " ").trim();
+            function findSignature(obj) {
+              if (obj === null || obj === undefined) return "";
+              if (typeof obj === "string") {
+                try { obj = JSON.parse(obj); } catch { return ""; }
+              }
+              if (typeof obj !== "object") return "";
+              if (Array.isArray(obj)) {
+                for (const item of obj) {
+                  const f = findSignature(item);
+                  if (f) return f;
+                }
+                return "";
+              }
+              if (obj.signature && typeof obj.signature === "string") {
+                return normalize(obj.signature).replace(/\\n/g, " ");
+              }
+              for (const key of Object.keys(obj)) {
+                const f = findSignature(obj[key]);
+                if (f) return f;
+              }
+              return "";
+            }
+            // 全局变量
+            for (const data of [window.__INITIAL_STATE__, window._SSR_HYDRATED_DATA, window.__RENDER_DATA__]) {
+              if (!data) continue;
+              const sig = findSignature(data);
+              if (sig) return { url: location.href, profileDetail: sig };
+            }
+            // RENDER_DATA / SSR_HYDRATED_DATA script 标签
+            const el = document.getElementById("RENDER_DATA") || document.getElementById("SSR_HYDRATED_DATA");
+            if (el) {
+              try {
+                const sig = findSignature(JSON.parse(decodeURIComponent(el.textContent || "")));
+                if (sig) return { url: location.href, profileDetail: sig };
+              } catch {}
+            }
+            // 页面 script 标签
+            for (const script of document.querySelectorAll("script")) {
+              const text = script.textContent || "";
+              if (!text.includes("signature")) continue;
+              try {
+                const sig = findSignature(JSON.parse(text));
+                if (sig) return { url: location.href, profileDetail: sig };
+              } catch {}
+              const m = text.match(/"signature"\s*:\s*"([^"]{4,300})"/);
+              if (m) return { url: location.href, profileDetail: normalize(m[1]).replace(/\\n/g, " ") };
+            }
+            return { url: location.href, profileDetail: "" };
+          }
+        });
+        const profile = profileResult?.result || {};
+
+        // 4. 截图（调用 background.js）
+        const response = await chrome.runtime.sendMessage({
+          type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
+          tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url }
+        });
+
+        if (!response?.ok) throw new Error(response?.error || "截图失败");
+
+        // 5. 存 IndexedDB + 更新内存缓存
+        await saveShotToDB(account.id, response.shot.screenshotDataUrl, response.shot.capturedAt);
+        state.shotAccountIdSet.add(account.id);
+        state.shotCache.set(account.id, response.shot.screenshotDataUrl);
+
+        // 6. 同步 signature 到备注
+        if (profile.profileDetail) {
+          account.note = upsertProfileNote(account.note, profile.profileDetail);
+          account.profileDetail = profile.profileDetail;
+          account.profileDetailSyncedAt = new Date().toISOString();
+        }
+
+        done++;
+        addLog(`✓ ${i + 1}/${missing.length} ${account.nickname}${profile.profileDetail ? " +signature" : ""}`, "success");
+      } catch (err) {
+        failed++;
+        addLog(`✗ ${i + 1}/${missing.length} ${account.nickname}：${err.message || err}`, "failure");
+      } finally {
+        // 7. 关闭标签页
+        if (tab) {
+          try { await chrome.tabs.remove(tab.id); } catch {}
+        }
+        // 8. 间隔（避免被检测）
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+
+    // 保存 accounts 到 storage
+    await chrome.storage.local.set({ accounts: state.accounts });
+    renderContent();
+    await updateMeta();
+
+    addLog(`补图完成：成功 ${done}，失败 ${failed}，共 ${missing.length}`, done > 0 ? "success" : "info");
+    els.captureStatus.textContent = "";
+    state.autoShotRunning = false;
+    els.autoShot.disabled = false;
+    els.stopShot.disabled = true;
   });
 
   els.stopShot.addEventListener("click", () => {
-    addLog("用户请求停止（占位）", "info");
+    state.autoShotRunning = false;
+    addLog("正在停止补图循环...", "info");
+    els.stopShot.disabled = true;
   });
 
   els.logs.addEventListener("click", () => {
