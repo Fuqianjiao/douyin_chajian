@@ -699,7 +699,10 @@ async function captureCurrentView() {
   }
 }
 
-/* ─── 仅补缺失截图（触发 background 执行，popup 只负责 UI） ─── */
+/* ─── 仅补缺失截图（v0.1.25 风格：popup 内联执行） ─── */
+
+/* 运行锁（防止重复点击） */
+let _fillShotRunning = false;
 
 function startShotLog(total) {
   els.shotLogSection.hidden = false;
@@ -720,77 +723,209 @@ function finalizeShotLog(summary) {
   els.shotLogSummary.textContent = summary || "";
 }
 
-/* 监听 background 通过 storage 发来的补图进度 */
-chrome.storage.onChanged.addListener((changes) => {
-  if (!changes.fillShotsProgress) return;
-  const data = changes.fillShotsProgress.newValue;
-  if (!data) return;
+function waitForTabComplete(tabId, timeoutMs = 25000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (updatedTabId, info) => {
+      if (updatedTabId === tabId && info.status === "complete") done();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId, (current) => {
+      if (current?.status === "complete") done();
+    });
+    setTimeout(done, timeoutMs);
+  });
+}
 
-  switch (data.type) {
-    case "start":
-      startShotLog(data.total);
-      appendShotLog({ type: "info", message: `开始补缺失截图，共 ${data.total} 个账号...` });
-      setStatus(`开始补缺失截图，共 ${data.total} 个账号（后台运行中）...`, 5);
-      break;
+async function focusTabForCapture(tabId, windowId) {
+  await chrome.windows.update(windowId, { focused: true });
+  await chrome.tabs.update(tabId, { active: true });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+}
 
-    case "progress":
-      setStatus(`补图中 ${data.current}/${data.total}：${data.nickname || ""}`, Math.round((data.current / data.total) * 95));
-      break;
-
-    case "log":
-      appendShotLog(data);
-      /* 同步更新计数 */
-      if (data.type === "success") {
-        state.screenshotCount++;
-        render();
-      }
-      break;
-
-    case "done":
-      const summary = data.log || `补图完成：成功 ${data.done}，失败 ${data.failed}`;
-      appendShotLog({ type: data.done > 0 ? "success" : "info", message: summary });
-      finalizeShotLog(summary);
-      setStatus(summary, 100);
-      /* 刷新最终数据 */
-      if (data.screenshotCount !== undefined) {
-        state.screenshotCount = data.screenshotCount;
-        render();
-      }
-      break;
+/* 注入到目标页提取 signature + 作品区裁剪坐标 */
+function extractProfileAndCrop() {
+  const normalize = (v) => String(v || "").replace(/\s+/g, " ").trim();
+  function worksCropRect() {
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const visible = (element) => {
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+        rect.top < viewportHeight && rect.left < viewportWidth &&
+        style.visibility !== "hidden" && style.display !== "none";
+    };
+    const tabNode = [...document.querySelectorAll("span, div, a, button")]
+      .filter(visible)
+      .find((node) => /^\s*作品\s*\d*/.test(normalize(node.textContent)));
+    const tabRect = tabNode?.getBoundingClientRect();
+    const tabTop = tabRect ? Math.max(0, tabRect.top - 8) : 0;
+    const mediaRects = [...document.querySelectorAll("img, video, canvas, a, div")]
+      .filter(visible)
+      .filter((node) => {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        const tag = node.tagName.toLowerCase();
+        const hasMediaTag = ["img", "video", "canvas"].includes(tag);
+        const hasBackground = style.backgroundImage && style.backgroundImage !== "none";
+        const hasMediaChild = !hasMediaTag && Boolean(node.querySelector?.("img, video, canvas"));
+        return (hasMediaTag || hasBackground || hasMediaChild) &&
+          rect.width <= Math.min(560, viewportWidth - 120) &&
+          rect.height <= Math.min(760, viewportHeight);
+      })
+      .map((node) => node.getBoundingClientRect())
+      .filter((rect) => rect.width >= 120 && rect.height >= 120)
+      .filter((rect) => rect.top >= Math.max(0, tabTop - 12))
+      .filter((rect) => rect.left > 120);
+    if (!mediaRects.length) return null;
+    const left = Math.max(0, Math.min(tabRect?.left ?? Infinity, ...mediaRects.map((rect) => rect.left)) - 2);
+    const top = Math.max(0, tabRect ? tabTop : Math.min(...mediaRects.map((rect) => rect.top)) - 16);
+    const right = Math.min(viewportWidth, Math.max(...mediaRects.map((rect) => rect.right)) + 2);
+    const bottom = Math.min(viewportHeight, Math.max(...mediaRects.map((rect) => rect.bottom)) + 36);
+    const width = right - left;
+    const height = bottom - top;
+    if (width < 240 || height < 180) return null;
+    return { x: left, y: top, width, height, viewportWidth, viewportHeight };
   }
-});
+  const crop = worksCropRect();
+  function findSignature(obj) {
+    if (obj === null || obj === undefined) return "";
+    if (typeof obj === "string") { try { obj = JSON.parse(obj); } catch { return ""; } }
+    if (typeof obj !== "object") return "";
+    if (Array.isArray(obj)) { for (const item of obj) { const f = findSignature(item); if (f) return f; } return ""; }
+    if (obj.signature && typeof obj.signature === "string") return normalize(obj.signature).replace(/\\n/g, " ");
+    for (const key of Object.keys(obj)) { const f = findSignature(obj[key]); if (f) return f; }
+    return "";
+  }
+  for (const data of [window.__INITIAL_STATE__, window._SSR_HYDRATED_DATA, window.__RENDER_DATA__]) {
+    if (!data) continue;
+    const sig = findSignature(data);
+    if (sig) return { url: location.href, profileDetail: sig, crop };
+  }
+  const el = document.getElementById("RENDER_DATA") || document.getElementById("SSR_HYDRATED_DATA");
+  if (el) { try { const sig = findSignature(JSON.parse(decodeURIComponent(el.textContent || ""))); if (sig) return { url: location.href, profileDetail: sig, crop }; } catch {} }
+  for (const script of document.querySelectorAll("script")) {
+    const text = script.textContent || "";
+    if (!text.includes("signature")) continue;
+    try { const sig = findSignature(JSON.parse(text)); if (sig) return { url: location.href, profileDetail: sig, crop }; } catch {}
+    const m = text.match(/"signature"\s*:\s*"([^"]{4,300})"/);
+    if (m) return { url: location.href, profileDetail: normalize(m[1]).replace(/\\n/g, " "), crop };
+  }
+  return { url: location.href, profileDetail: "", crop };
+}
 
 async function fillMissingScreenshots() {
-  // 检查 background 是否正在运行
-  const statusResp = await chrome.runtime.sendMessage({ type: "DOUYIN_GALLERY_FILL_SHOTS_STATUS" });
-  if (statusResp?.running) {
-    setStatus("补图正在进行中，请等待完成...", 100);
+  if (_fillShotRunning) { setStatus("补图正在进行中，请等待完成...", 100); return; }
+  _fillShotRunning = true;
+
+  const keySet = await loadShotKeySet();
+  const missing = state.accounts.filter((a) => a.homeUrl && !accountHasShot(a, keySet));
+
+  if (!missing.length) {
+    startShotLog(0);
+    appendShotLog({ type: "info", message: "没有缺失截图的账号，全部已绑定。" });
+    finalizeShotLog("无需补图");
+    setStatus("没有缺失截图的账号，全部已绑定。", 100);
+    _fillShotRunning = false;
     return;
   }
 
-  startShotLog(0); /* 先显示日志区，等 background 回报 total */
-  appendShotLog({ type: "info", message: "正在启动补图任务..." });
-  setStatus("已发送补图指令到后台，请勿关闭此弹窗。", 10);
+  const total = missing.length;
+  let done = 0, failed = 0;
+  startShotLog(total);
+  setStatus(`开始补缺失截图，共 ${total} 个账号...`, 5);
 
   try {
-    // 发消息给 background.js 执行补图，然后通过 storage.onChanged 接收进度
-    const response = await chrome.runtime.sendMessage({ type: "DOUYIN_GALLERY_FILL_MISSING_SHOTS" });
+    for (let i = 0; i < total; i++) {
+      const account = missing[i];
+      const progress = Math.round((i / total) * 100);
+      setStatus(`补图中 ${i + 1}/${total}：${account.nickname}`, Math.max(5, progress));
+      let tab = null, line;
 
-    if (!response?.ok) {
-      throw new Error(response?.error || "补图任务失败");
+      try {
+        // 1. 打开博主主页
+        tab = await chrome.tabs.create({ url: account.homeUrl, active: true });
+        await focusTabForCapture(tab.id, tab.windowId);
+
+        // 2. 等待页面加载完全（超时 25s）
+        await waitForTabComplete(tab.id, 25000);
+
+        // 标签页存在性检查
+        try { await chrome.tabs.get(tab.id); } catch { throw new Error("标签页被提前关闭"); }
+
+        // 3. 等待视觉渲染
+        await new Promise((r) => setTimeout(r, 1800));
+        try { await chrome.tabs.get(tab.id); } catch { throw new Error("标签页在渲染期间被关闭"); }
+
+        // 4. 提取签名 + 裁剪坐标
+        const [profileResult] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id }, func: extractProfileAndCrop
+        });
+        const profile = profileResult?.result || {};
+
+        // 5. 截图
+        await focusTabForCapture(tab.id, tab.windowId);
+        const response = await chrome.runtime.sendMessage({
+          type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
+          tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url },
+          crop: profile.crop
+        });
+        if (!response?.ok) throw new Error(response?.error || "截图失败");
+
+        // 6. 绑定到画廊
+        const bindingAccount = findAccountByUrl(profile.url || response.shot.url || tab.url) || account;
+        const bindUrls = [account.homeUrl, bindingAccount.homeUrl, profile.url, response.shot.url, tab.url];
+        await saveScreenshotToDB(bindingAccount, response.shot.screenshotDataUrl, response.shot.capturedAt, bindUrls);
+        if (bindingAccount.id !== account.id) {
+          await saveScreenshotToDB(account, response.shot.screenshotDataUrl, response.shot.capturedAt, bindUrls);
+        }
+        let verifiedShot = await getScreenshotFromDB(account);
+        if (!verifiedShot?.dataUrl && bindingAccount.id !== account.id) verifiedShot = await getScreenshotFromDB(bindingAccount);
+        if (!verifiedShot?.dataUrl) throw new Error("截图已生成但未能回读验证，绑定失败");
+
+        // 7. 同步签名
+        if (profile.profileDetail) {
+          bindingAccount.note = upsertProfileNote(bindingAccount.note, profile.profileDetail);
+          bindingAccount.profileDetail = profile.profileDetail;
+          bindingAccount.profileDetailSyncedAt = new Date().toISOString();
+          if (bindingAccount.id !== account.id) {
+            account.note = upsertProfileNote(account.note, profile.profileDetail);
+            account.profileDetail = profile.profileDetail;
+          }
+        }
+
+        // 8. 刷新计数
+        state.screenshotCount = await countScreenshotsInDB();
+        render();
+        done++;
+        line = { type: "success", message: `\u2713 ${i + 1}/${total} ${account.nickname}${profile.profileDetail ? " +signature" : ""}` };
+      } catch (err) {
+        failed++;
+        line = { type: "failure", message: `\u2717 ${i + 1}/${total} ${account.nickname}\uff1a${err.message || err}` };
+      } finally {
+        if (tab) { try { await chrome.tabs.remove(tab.id); } catch {} }
+        appendShotLog(line);
+        if (i < total - 1) await new Promise((r) => setTimeout(r, 1500));
+      }
     }
 
-    const result = response.result;
-    if (result.total === 0) {
-      appendShotLog({ type: "info", message: result.log || "没有缺失截图的账号。" });
-      finalizeShotLog("无需补图");
-      setStatus("没有缺失截图的账号，全部已绑定。", 100);
-    }
-    // done/done 类型的日志已在 onChanged 监听器中处理
-  } catch (err) {
-    appendShotLog({ type: "failure", message: err.message || String(err) });
-    finalizeShotLog("异常终止");
-    setStatus(err.message || "补图异常", 0);
+    await chrome.storage.local.set({ accounts: state.accounts });
+    state.screenshotCount = await countScreenshotsInDB();
+    render();
+    const summary = `补图完成：成功 ${done}，失败 ${failed}，共 ${total}`;
+    appendShotLog({ type: done > 0 ? "success" : "info", message: summary });
+    finalizeShotLog(summary);
+    setStatus(summary, 100);
+  } finally {
+    _fillShotRunning = false;
   }
 }
 
