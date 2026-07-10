@@ -2,7 +2,8 @@ const state = {
   accounts: [],
   screenshotCount: 0,
   lastRunAdded: 0,
-  config: null
+  config: null,
+  fillShotRunning: false
 };
 
 const els = {
@@ -841,6 +842,12 @@ function finalizeShotLog(summary) {
 }
 
 async function fillMissingScreenshots() {
+  if (state.fillShotRunning) {
+    setStatus("补图正在进行中，请等待完成...", 100);
+    return;
+  }
+  state.fillShotRunning = true;
+
   const keySet = await loadShotKeySet();
   const missing = state.accounts.filter((a) => a.homeUrl && !accountHasShot(a, keySet));
   if (!missing.length) {
@@ -848,6 +855,7 @@ async function fillMissingScreenshots() {
     appendShotLog({ type: "info", message: "没有缺失截图的账号，全部已绑定。" });
     finalizeShotLog("无需补图");
     setStatus("没有缺失截图的账号，全部已绑定。", 100);
+    state.fillShotRunning = false;
     return;
   }
 
@@ -857,88 +865,114 @@ async function fillMissingScreenshots() {
   startShotLog(total);
   setStatus(`开始补缺失截图，共 ${total} 个账号（请保持看板打开）...`, 5);
 
-  for (let i = 0; i < total; i++) {
-    const account = missing[i];
-    const progress = Math.round((i / total) * 100);
-    setStatus(`补图中 ${i + 1}/${total}：${account.nickname}`, Math.max(5, progress));
-    let tab = null;
-    let line;
-    try {
-      // 1. 打开博主主页（激活标签，captureVisibleTab 只能截激活标签）
-      tab = await chrome.tabs.create({ url: account.homeUrl, active: true });
-      await focusTabForCapture(tab.id, tab.windowId);
-      // 2. 等待页面加载完全，超时 25s
-      await waitForTabComplete(tab.id, 25000);
-      // 额外等待视觉渲染（激活标签需渲染到屏幕才能截到）
-      await new Promise((r) => setTimeout(r, 1800));
+  try {
+    for (let i = 0; i < total; i++) {
+      const account = missing[i];
+      const progress = Math.round((i / total) * 100);
+      setStatus(`补图中 ${i + 1}/${total}：${account.nickname}`, Math.max(5, progress));
+      let tab = null;
+      let line;
+      try {
+        // 1. 打开博主主页（激活标签，captureVisibleTab 只能截激活标签）
+        tab = await chrome.tabs.create({ url: account.homeUrl, active: true });
+        await focusTabForCapture(tab.id, tab.windowId);
+        // 2. 等待页面加载完全，超时 25s
+        await waitForTabComplete(tab.id, 25000);
 
-      // 3. 提取 signature + 作品区裁剪坐标
-      const [profileResult] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: extractProfileAndCrop
-      });
-      const profile = profileResult?.result || {};
+        // 防御性检查：标签页可能已被用户手动关闭
+        try {
+          await chrome.tabs.get(tab.id);
+        } catch {
+          throw new Error("标签页被提前关闭");
+        }
 
-      // 截图前再次确保标签是激活的
-      await focusTabForCapture(tab.id, tab.windowId);
+        // 额外等待视觉渲染（激活标签需渲染到屏幕才能截到）
+        await new Promise((r) => setTimeout(r, 1800));
 
-      // 4. 截图（调用 background.js）
-      const response = await chrome.runtime.sendMessage({
-        type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
-        tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url },
-        crop: profile.crop
-      });
-      if (!response?.ok) throw new Error(response?.error || "截图失败");
+        // 再次确认标签页仍存在
+        try {
+          await chrome.tabs.get(tab.id);
+        } catch {
+          throw new Error("标签页在渲染等待期间被关闭");
+        }
 
-      // 5. 绑定到画廊（存 IndexedDB）
-      const bindingAccount = findAccountByUrl(profile.url || response.shot.url || tab.url) || account;
-      const bindUrls = [account.homeUrl, bindingAccount.homeUrl, profile.url, response.shot.url, tab.url];
-      await saveScreenshotToDB(bindingAccount, response.shot.screenshotDataUrl, response.shot.capturedAt, bindUrls);
-      if (bindingAccount.id !== account.id) {
-        await saveScreenshotToDB(account, response.shot.screenshotDataUrl, response.shot.capturedAt, bindUrls);
-      }
-      let verifiedShot = await getScreenshotFromDB(account);
-      if (!verifiedShot?.dataUrl && bindingAccount.id !== account.id) {
-        verifiedShot = await getScreenshotFromDB(bindingAccount);
-      }
-      if (!verifiedShot?.dataUrl) {
-        throw new Error("截图已生成但未能按账号链接回读，绑定失败");
-      }
+        // 3. 提取 signature + 作品区裁剪坐标
+        const [profileResult] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: extractProfileAndCrop
+        });
+        const profile = profileResult?.result || {};
 
-      // 6. 同步 signature 到备注
-      if (profile.profileDetail) {
-        bindingAccount.note = upsertProfileNote(bindingAccount.note, profile.profileDetail);
-        bindingAccount.profileDetail = profile.profileDetail;
-        bindingAccount.profileDetailSyncedAt = new Date().toISOString();
+        // 截图前再次确保标签是激活的
+        await focusTabForCapture(tab.id, tab.windowId);
+
+        // 4. 截图（调用 background.js）
+        const response = await chrome.runtime.sendMessage({
+          type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
+          tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url },
+          crop: profile.crop
+        });
+        if (!response?.ok) throw new Error(response?.error || "截图失败");
+
+        // 5. 绑定到画廊（存 IndexedDB）
+        const bindingAccount = findAccountByUrl(profile.url || response.shot.url || tab.url) || account;
+        const bindUrls = [account.homeUrl, bindingAccount.homeUrl, profile.url, response.shot.url, tab.url];
+        await saveScreenshotToDB(bindingAccount, response.shot.screenshotDataUrl, response.shot.capturedAt, bindUrls);
         if (bindingAccount.id !== account.id) {
-          account.note = upsertProfileNote(account.note, profile.profileDetail);
-          account.profileDetail = profile.profileDetail;
-          account.profileDetailSyncedAt = bindingAccount.profileDetailSyncedAt;
+          await saveScreenshotToDB(account, response.shot.screenshotDataUrl, response.shot.capturedAt, bindUrls);
+        }
+        let verifiedShot = await getScreenshotFromDB(account);
+        if (!verifiedShot?.dataUrl && bindingAccount.id !== account.id) {
+          verifiedShot = await getScreenshotFromDB(bindingAccount);
+        }
+        if (!verifiedShot?.dataUrl) {
+          throw new Error("截图已生成但未能按账号链接回读，绑定失败");
+        }
+
+        // 6. 同步 signature 到备注
+        if (profile.profileDetail) {
+          bindingAccount.note = upsertProfileNote(bindingAccount.note, profile.profileDetail);
+          bindingAccount.profileDetail = profile.profileDetail;
+          bindingAccount.profileDetailSyncedAt = new Date().toISOString();
+          if (bindingAccount.id !== account.id) {
+            account.note = upsertProfileNote(account.note, profile.profileDetail);
+            account.profileDetail = profile.profileDetail;
+            account.profileDetailSyncedAt = bindingAccount.profileDetailSyncedAt;
+          }
+        }
+
+        // 7. 立即刷新截图计数和 UI（不必等全部完成）
+        account._hasScreenshot = true;
+        state.screenshotCount = await countScreenshotsInDB();
+        render();
+
+        done++;
+        line = { type: "success", message: `✓ ${i + 1}/${total} ${account.nickname}${profile.profileDetail ? " +signature" : ""}` };
+      } catch (err) {
+        failed++;
+        line = { type: "failure", message: `✗ ${i + 1}/${total} ${account.nickname}：${err.message || err}` };
+      } finally {
+        // 8. 关闭当前链接，继续下一轮
+        if (tab) {
+          try { await chrome.tabs.remove(tab.id); } catch { /* 标签页可能已被关闭 */ }
+        }
+        appendShotLog(line);
+        if (i < total - 1) {
+          await new Promise((r) => setTimeout(r, 1500));
         }
       }
-
-      done++;
-      line = { type: "success", message: `✓ ${i + 1}/${total} ${account.nickname}${profile.profileDetail ? " +signature" : ""}` };
-    } catch (err) {
-      failed++;
-      line = { type: "failure", message: `✗ ${i + 1}/${total} ${account.nickname}：${err.message || err}` };
-    } finally {
-      // 7. 关闭当前链接，继续下一轮
-      if (tab) {
-        try { await chrome.tabs.remove(tab.id); } catch {}
-      }
-      appendShotLog(line);
-      await new Promise((r) => setTimeout(r, 1500));
     }
-  }
 
-  await chrome.storage.local.set({ accounts: state.accounts });
-  state.screenshotCount = await countScreenshotsInDB();
-  render();
-  const summary = `补图完成：成功 ${done}，失败 ${failed}，共 ${total}`;
-  appendShotLog({ type: done > 0 ? "success" : "info", message: summary });
-  finalizeShotLog(summary);
-  setStatus(summary, 100);
+    await chrome.storage.local.set({ accounts: state.accounts });
+    state.screenshotCount = await countScreenshotsInDB();
+    render();
+    const summary = `补图完成：成功 ${done}，失败 ${failed}，共 ${total}`;
+    appendShotLog({ type: done > 0 ? "success" : "info", message: summary });
+    finalizeShotLog(summary);
+    setStatus(summary, 100);
+  } finally {
+    state.fillShotRunning = false;
+  }
 }
 
 function groupedAccounts() {
