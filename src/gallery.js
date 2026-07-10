@@ -1309,6 +1309,23 @@ function bindEvents() {
   els.confirmCancel.addEventListener("click", () => { els.confirmModal.hidden = true; });
 }
 
+/** 旧中文分类名 → 新紧凑英文映射（v0.1.37 一次性迁移） */
+const CATEGORY_NAME_MIGRATE = {
+  "美食与生活方式": "Lifestyle",
+  "知识职场与产品": "Business",
+  "舞蹈音乐与表演": "Dance",
+  "颜值穿搭与妆造": "Beauty",
+  "校园与年轻人设": "Student",
+  "搞笑": "Funny",
+  "明星": "Celebrity",
+  "运动": "Sports",
+  "非博主": "Brand"
+};
+
+function migrateCategoryName(name) {
+  return CATEGORY_NAME_MIGRATE[name] || name;
+}
+
 (async function init() {
   bindEvents();
   const stored = await chrome.storage.local.get(["accounts"]);
@@ -1316,7 +1333,15 @@ function bindEvents() {
   await chrome.storage.local.remove("pageShots");
   const originalAccountsJson = JSON.stringify(stored.accounts || []);
   state.accounts = (stored.accounts || []).map((a) => {
-    const clean = cleanAccountIdentity(a);
+    let clean = cleanAccountIdentity(a);
+    /* 迁移旧中文分类名到紧凑英文 */
+    clean.category = migrateCategoryName(clean.category);
+    if (Array.isArray(clean.tags)) {
+      clean.tags = clean.tags.map((t) => ({
+        ...t,
+        name: migrateCategoryName(t.name)
+      }));
+    }
     return { ...clean, tags: ensureTags(clean) };
   });
   if (originalAccountsJson !== JSON.stringify(state.accounts)) {
