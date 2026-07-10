@@ -867,6 +867,12 @@ h3.nickname:focus-visible {
   color: var(--cyan);
 }
 
+.plus-sign {
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 300;
+}
+
 .note-preview {
   display: flex;
   flex-wrap: wrap;
@@ -959,6 +965,18 @@ h3.nickname:focus-visible {
   font-size: 12px;
   font-weight: 500;
   opacity: 0.6;
+}
+
+/* 标签待删除状态（保存前暂态） */
+.editor-tag.pending-removal {
+  opacity: 0.4;
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 47, 99, .6);
+  border-color: rgba(255, 47, 99, .25) !important;
+}
+
+.editor-tag.pending-removal button {
+  color: var(--accent);
 }
 
 .hint {

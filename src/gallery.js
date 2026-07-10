@@ -268,6 +268,7 @@ const state = {
   batchTagSelected: new Set(),
   editingAccountId: null,
   editingNoteImages: [],
+  pendingTagRemovals: new Set(),
   logs: []
 };
 
@@ -683,6 +684,7 @@ function openEditor(accountId) {
   const account = state.accounts.find((a) => a.id === accountId);
   if (!account) return;
   state.editingAccountId = accountId;
+  state.pendingTagRemovals.clear();
   els.editorTitle.textContent = `编辑「${account.nickname}」`;
   els.noteText.value = account.note || "";
   state.editingNoteImages = Array.isArray(account.noteImages) ? account.noteImages.slice() : [];
@@ -711,30 +713,41 @@ function renderEditorTags() {
   const account = state.accounts.find((a) => a.id === state.editingAccountId);
   if (!account) return;
   const tags = ensureTags(account);
-  els.editorTags.innerHTML = tags.map((tag, index) => `
-    <span class="editor-tag ${tag.source === "ai" ? "ai" : "user"}">
-      ${escapeHtml(tag.name)} <small>${tag.source === "ai" ? "AI" : "人工"}</small>
-      <button data-remove-tag="${index}" type="button" title="移除">×</button>
-    </span>
-  `).join("") || "";
+  els.editorTags.innerHTML = tags.map((tag, index) => {
+    const isPending = state.pendingTagRemovals.has(index);
+    const pendingClass = isPending ? " pending-removal" : "";
+    const pendingAttr = isPending ? ` data-pending-removal="true"` : "";
+    return `
+      <span class="editor-tag ${tag.source === "ai" ? "ai" : "user"}${pendingClass}"${pendingAttr}>
+        ${escapeHtml(tag.name)} <small>${tag.source === "ai" ? "AI" : "人工"}</small>
+        <button data-remove-tag="${index}" type="button" title="${isPending ? "撤销删除（保存后生效）" : "移除"}">${isPending ? "↩" : "×"}</button>
+      </span>`;
+  }).join("") || `<div class="editor-tags-empty">暂无已选标签</div>`;
   els.editorTags.querySelectorAll("[data-remove-tag]").forEach((btn) => {
-    btn.addEventListener("click", () => removeTagInEditor(Number(btn.dataset.removeTag)));
+    btn.addEventListener("click", () => toggleTagRemoval(Number(btn.dataset.removeTag)));
   });
 }
 
-function removeTagInEditor(index) {
+/* 暂态删除/撤销标签（保存前不实际修改 account.tags） */
+function toggleTagRemoval(index) {
   const account = state.accounts.find((a) => a.id === state.editingAccountId);
   if (!account) return;
   const tags = ensureTags(account);
   const target = tags[index];
   if (!target) return;
-  if (target.source === "ai" && tags.filter((t) => t.source === "ai").length <= MIN_AI_TAGS) {
-    showToast("不能删除", "至少保留 1 个 AI 标签");
+  if (state.pendingTagRemovals.has(index)) {
+    // 撤销待删除
+    state.pendingTagRemovals.delete(index);
+    renderEditorTags();
     return;
   }
-  tags.splice(index, 1);
-  account.tags = tags;
-  account.category = tags[0]?.name || "未分类";
+  // 标记为待删除（校验：至少保留 1 个标签）
+  const remainingAfter = tags.filter((_, i) => !state.pendingTagRemovals.has(i) && i !== index).length;
+  if (remainingAfter < 1) {
+    showToast("不能删除", "每个博主至少需要保留 1 个标签");
+    return;
+  }
+  state.pendingTagRemovals.add(index);
   renderEditorTags();
 }
 
@@ -761,9 +774,28 @@ function addTagInEditor() {
 function saveEditor() {
   const account = state.accounts.find((a) => a.id === state.editingAccountId);
   if (!account) return;
+
+  /* 校验：至少保留 1 个标签 */
+  const tags = ensureTags(account);
+  const remaining = tags.filter((_, i) => !state.pendingTagRemovals.has(i));
+  if (remaining.length < 1) {
+    showToast("保存失败", "每个博主至少需要保留 1 个标签，请撤销部分删除后再保存");
+    return;
+  }
+
+  /* 执行态删除（按索引从大到小删，避免索引偏积） */
+  const indices = [...state.pendingTagRemovals].sort((a, b) => b - a);
+  for (const idx of indices) {
+    if (tags[idx]) tags.splice(idx, 1);
+  }
+  account.tags = tags.length > 0 ? tags : [{ name: "未分类", source: "ai" }];
+  account.category = account.tags[0]?.name || "未分类";
+  state.pendingTagRemovals.clear();
+
   account.note = els.noteText.value.trim();
   account.noteImages = state.editingNoteImages.slice();
   persist();
+
   renderContent();
   els.editorModal.hidden = true;
   showToast("已保存", `「${account.nickname}」的标签和备注已更新`);
@@ -1212,6 +1244,21 @@ function bindEvents() {
       if (dataUrl) state.editingNoteImages.push(dataUrl);
     }
     event.target.value = "";
+    renderNotePreview();
+  });
+
+  /* 粘贴上传图片（Ctrl+V / Cmd+V）— 在编辑弹窗打开时生效 */
+  document.addEventListener("paste", async (event) => {
+    if (els.editorModal.hidden || !state.editingAccountId) return;
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (!item.type.startsWith("image/")) continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      const dataUrl = await readFileAsDataUrl(file);
+      if (dataUrl) state.editingNoteImages.push(dataUrl);
+    }
     renderNotePreview();
   });
 
