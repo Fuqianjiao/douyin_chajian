@@ -353,8 +353,10 @@ function readFileAsDataUrl(file) {
 
 function ensureTags(account) {
   const tags = Array.isArray(account.tags) ? account.tags.slice() : [];
+  /* 仅在完全无 AI 标签时才插入；优先复用已有首个标签名作为 AI 名，避免用陈旧 category 覆盖用户已编辑的标签 */
   if (!tags.some((t) => t.source === "ai")) {
-    tags.unshift({ name: account.category || "未分类", source: "ai" });
+    const aiName = tags[0]?.name || account.category || "未分类";
+    tags.unshift({ name: aiName, source: "ai" });
   }
   return tags.slice(0, MAX_TAGS);
 }
@@ -772,6 +774,7 @@ function addTagInEditor() {
   }
   tags.push({ name, source: "human" });
   account.tags = tags;
+  account.category = tags[0]?.name || account.category || "未分类";
   els.tagInput.value = "";
   renderEditorTags();
 }
@@ -786,6 +789,10 @@ function saveEditor() {
     showToast("保存失败", "每个博主至少需要保留 1 个标签");
     return;
   }
+
+  /* 关键修复：将编辑器中最终确定的标签和 category 同步写回账号对象 */
+  account.tags = tags;
+  account.category = tags[0]?.name || account.category || "未分类";
 
   account.note = els.noteText.value.trim();
   account.noteImages = state.editingNoteImages.slice();
