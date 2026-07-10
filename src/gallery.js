@@ -39,6 +39,20 @@ function shotKeyForAccount(account) {
   return profileKey(account?.homeUrl) || account?.id || "";
 }
 
+function shotLookupKeys(account, extraUrls = []) {
+  return [...new Set([
+    profileKey(account?.homeUrl),
+    account?.id,
+    ...extraUrls.map(profileKey)
+  ].filter(Boolean))];
+}
+
+function findAccountByUrl(url) {
+  const key = profileKey(url);
+  if (!key) return null;
+  return state.accounts.find((account) => profileKey(account.homeUrl) === key) || null;
+}
+
 function requestToPromise(request) {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -48,10 +62,25 @@ function requestToPromise(request) {
 
 async function getShotFromDB(account) {
   const db = await openShotDB();
-  const homeKey = shotKeyForAccount(account);
+  const keys = shotLookupKeys(account);
+  const homeKey = profileKey(account?.homeUrl);
   if (homeKey && db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
     const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
     const shot = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).get(homeKey));
+    if (shot) return shot;
+  }
+  if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+    const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
+    const shots = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).getAll());
+    const shot = (shots || []).find((item) => {
+      const itemKeys = [
+        item.homeKey,
+        item.canonicalHomeKey,
+        item.accountId,
+        profileKey(item.homeUrl)
+      ].filter(Boolean);
+      return itemKeys.some((key) => keys.includes(key));
+    });
     if (shot) return shot;
   }
   if (!account?.id) return null;
@@ -62,14 +91,15 @@ async function getShotFromDB(account) {
 
 async function countShotsInDB() {
   const db = await openShotDB();
-  const storeName = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE) ? SCREENSHOT_BY_URL_STORE : SCREENSHOT_STORE;
-  const tx = db.transaction(storeName, "readonly");
-  const store = tx.objectStore(storeName);
-  const request = store.count();
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+  if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+    const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
+    const shots = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).getAll());
+    const keys = new Set((shots || []).map((shot) => shot.canonicalHomeKey || shot.homeKey || shot.accountId).filter(Boolean));
+    return keys.size;
+  }
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  const keys = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).getAllKeys());
+  return (keys || []).length;
 }
 
 async function loadShotAccountIdSet() {
@@ -77,8 +107,10 @@ async function loadShotAccountIdSet() {
   const set = new Set();
   if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
     const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
-    const keys = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).getAllKeys());
-    for (const key of keys || []) set.add(key);
+    const shots = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).getAll());
+    for (const shot of shots || []) {
+      [shot.homeKey, shot.canonicalHomeKey, shot.accountId, profileKey(shot.homeUrl)].filter(Boolean).forEach((key) => set.add(key));
+    }
   }
   const tx = db.transaction(SCREENSHOT_STORE, "readonly");
   const keys = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).getAllKeys());
@@ -88,10 +120,7 @@ async function loadShotAccountIdSet() {
 }
 
 function uniqueShotKeys(account, extraUrls = []) {
-  return [...new Set([
-    shotKeyForAccount(account),
-    ...extraUrls.map(profileKey)
-  ].filter(Boolean))];
+  return shotLookupKeys(account, extraUrls).filter((key) => key !== account?.id);
 }
 
 async function saveShotToDB(account, dataUrl, capturedAt, extraUrls = []) {
@@ -126,6 +155,7 @@ async function saveShotToDB(account, dataUrl, capturedAt, extraUrls = []) {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
   });
 }
 
@@ -1078,26 +1108,42 @@ function bindEvents() {
 
         if (!response?.ok) throw new Error(response?.error || "截图失败");
 
-        // 5. 存 IndexedDB + 更新内存缓存
-        await saveShotToDB(account, response.shot.screenshotDataUrl, response.shot.capturedAt, [
+        const bindingAccount = findAccountByUrl(profile.url || response.shot.url || tab.url) || account;
+        const bindUrls = [
+          account.homeUrl,
+          bindingAccount.homeUrl,
           profile.url,
           response.shot.url,
           tab.url
-        ]);
-        const verifiedShot = await getShotFromDB(account);
+        ];
+
+        // 5. 存 IndexedDB + 更新内存缓存
+        await saveShotToDB(bindingAccount, response.shot.screenshotDataUrl, response.shot.capturedAt, bindUrls);
+        if (bindingAccount.id !== account.id) {
+          await saveShotToDB(account, response.shot.screenshotDataUrl, response.shot.capturedAt, bindUrls);
+        }
+        let verifiedShot = await getShotFromDB(account);
+        if (!verifiedShot?.dataUrl && bindingAccount.id !== account.id) {
+          verifiedShot = await getShotFromDB(bindingAccount);
+        }
         if (!verifiedShot?.dataUrl) {
           throw new Error("截图已生成但未能按账号链接回读，绑定失败");
         }
-        const shotKey = shotKeyForAccount(account);
-        if (shotKey) state.shotAccountIdSet.add(shotKey);
-        state.shotAccountIdSet.add(account.id);
+        for (const key of shotLookupKeys(account, bindUrls)) state.shotAccountIdSet.add(key);
+        for (const key of shotLookupKeys(bindingAccount, bindUrls)) state.shotAccountIdSet.add(key);
         state.shotCache.set(account.id, verifiedShot.dataUrl);
+        state.shotCache.set(bindingAccount.id, verifiedShot.dataUrl);
 
         // 6. 同步 signature 到备注
         if (profile.profileDetail) {
-          account.note = upsertProfileNote(account.note, profile.profileDetail);
-          account.profileDetail = profile.profileDetail;
-          account.profileDetailSyncedAt = new Date().toISOString();
+          bindingAccount.note = upsertProfileNote(bindingAccount.note, profile.profileDetail);
+          bindingAccount.profileDetail = profile.profileDetail;
+          bindingAccount.profileDetailSyncedAt = new Date().toISOString();
+          if (bindingAccount.id !== account.id) {
+            account.note = upsertProfileNote(account.note, profile.profileDetail);
+            account.profileDetail = profile.profileDetail;
+            account.profileDetailSyncedAt = bindingAccount.profileDetailSyncedAt;
+          }
         }
 
         done++;
