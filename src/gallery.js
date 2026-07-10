@@ -970,6 +970,50 @@ function bindEvents() {
           target: { tabId: tab.id },
           func: () => {
             const normalize = (v) => String(v || "").replace(/\s+/g, " ").trim();
+            function worksCropRect() {
+              const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+              const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+              const visible = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+                  rect.top < viewportHeight && rect.left < viewportWidth &&
+                  style.visibility !== "hidden" && style.display !== "none";
+              };
+              const tabNode = [...document.querySelectorAll("span, div, a, button")]
+                .filter(visible)
+                .find((node) => /^作品\s*\d*/.test(normalize(node.textContent)));
+              const tabRect = tabNode?.getBoundingClientRect();
+              const tabTop = tabRect ? Math.max(0, tabRect.top - 8) : 0;
+              const mediaRects = [...document.querySelectorAll("img, video, canvas, a, div")]
+                .filter(visible)
+                .filter((node) => {
+                  const rect = node.getBoundingClientRect();
+                  const style = getComputedStyle(node);
+                  const tag = node.tagName.toLowerCase();
+                  const hasMediaTag = ["img", "video", "canvas"].includes(tag);
+                  const hasBackground = style.backgroundImage && style.backgroundImage !== "none";
+                  const hasMediaChild = !hasMediaTag && Boolean(node.querySelector?.("img, video, canvas"));
+                  return (hasMediaTag || hasBackground || hasMediaChild) &&
+                    rect.width <= Math.min(560, viewportWidth - 120) &&
+                    rect.height <= Math.min(760, viewportHeight);
+                })
+                .map((node) => node.getBoundingClientRect())
+                .filter((rect) => rect.width >= 120 && rect.height >= 120)
+                .filter((rect) => rect.top >= Math.max(0, tabTop - 12))
+                .filter((rect) => rect.left > 120);
+              if (!mediaRects.length) return null;
+              const left = Math.max(0, Math.min(tabRect?.left ?? Infinity, ...mediaRects.map((rect) => rect.left)) - 2);
+              const top = Math.max(0, tabRect ? tabTop : Math.min(...mediaRects.map((rect) => rect.top)) - 16);
+              const right = Math.min(viewportWidth, Math.max(...mediaRects.map((rect) => rect.right)) + 2);
+              const bottom = Math.min(viewportHeight, Math.max(...mediaRects.map((rect) => rect.bottom)) + 36);
+              const width = right - left;
+              const height = bottom - top;
+              if (width < 240 || height < 180) return null;
+              return { x: left, y: top, width, height, viewportWidth, viewportHeight };
+            }
+            const crop = worksCropRect();
             function findSignature(obj) {
               if (obj === null || obj === undefined) return "";
               if (typeof obj === "string") {
@@ -996,14 +1040,14 @@ function bindEvents() {
             for (const data of [window.__INITIAL_STATE__, window._SSR_HYDRATED_DATA, window.__RENDER_DATA__]) {
               if (!data) continue;
               const sig = findSignature(data);
-              if (sig) return { url: location.href, profileDetail: sig };
+              if (sig) return { url: location.href, profileDetail: sig, crop };
             }
             // RENDER_DATA / SSR_HYDRATED_DATA script 标签
             const el = document.getElementById("RENDER_DATA") || document.getElementById("SSR_HYDRATED_DATA");
             if (el) {
               try {
                 const sig = findSignature(JSON.parse(decodeURIComponent(el.textContent || "")));
-                if (sig) return { url: location.href, profileDetail: sig };
+                if (sig) return { url: location.href, profileDetail: sig, crop };
               } catch {}
             }
             // 页面 script 标签
@@ -1012,12 +1056,12 @@ function bindEvents() {
               if (!text.includes("signature")) continue;
               try {
                 const sig = findSignature(JSON.parse(text));
-                if (sig) return { url: location.href, profileDetail: sig };
+                if (sig) return { url: location.href, profileDetail: sig, crop };
               } catch {}
               const m = text.match(/"signature"\s*:\s*"([^"]{4,300})"/);
-              if (m) return { url: location.href, profileDetail: normalize(m[1]).replace(/\\n/g, " ") };
+              if (m) return { url: location.href, profileDetail: normalize(m[1]).replace(/\\n/g, " "), crop };
             }
-            return { url: location.href, profileDetail: "" };
+            return { url: location.href, profileDetail: "", crop };
           }
         });
         const profile = profileResult?.result || {};
@@ -1028,7 +1072,8 @@ function bindEvents() {
         // 4. 截图（调用 background.js）
         const response = await chrome.runtime.sendMessage({
           type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
-          tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url }
+          tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url },
+          crop: profile.crop
         });
 
         if (!response?.ok) throw new Error(response?.error || "截图失败");

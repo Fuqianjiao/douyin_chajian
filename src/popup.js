@@ -450,7 +450,51 @@ async function captureCurrentView() {
   const [profileResult] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: async () => {
-      const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      function worksCropRect() {
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+        const visible = (element) => {
+          if (!element) return false;
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+            rect.top < viewportHeight && rect.left < viewportWidth &&
+            style.visibility !== "hidden" && style.display !== "none";
+        };
+        const tabNode = [...document.querySelectorAll("span, div, a, button")]
+          .filter(visible)
+          .find((node) => /^作品\s*\d*/.test(normalize(node.textContent)));
+        const tabRect = tabNode?.getBoundingClientRect();
+        const tabTop = tabRect ? Math.max(0, tabRect.top - 8) : 0;
+        const mediaRects = [...document.querySelectorAll("img, video, canvas, a, div")]
+          .filter(visible)
+          .filter((node) => {
+            const rect = node.getBoundingClientRect();
+            const style = getComputedStyle(node);
+            const tag = node.tagName.toLowerCase();
+            const hasMediaTag = ["img", "video", "canvas"].includes(tag);
+            const hasBackground = style.backgroundImage && style.backgroundImage !== "none";
+            const hasMediaChild = !hasMediaTag && Boolean(node.querySelector?.("img, video, canvas"));
+            return (hasMediaTag || hasBackground || hasMediaChild) &&
+              rect.width <= Math.min(560, viewportWidth - 120) &&
+              rect.height <= Math.min(760, viewportHeight);
+          })
+          .map((node) => node.getBoundingClientRect())
+          .filter((rect) => rect.width >= 120 && rect.height >= 120)
+          .filter((rect) => rect.top >= Math.max(0, tabTop - 12))
+          .filter((rect) => rect.left > 120);
+        if (!mediaRects.length) return null;
+        const left = Math.max(0, Math.min(tabRect?.left ?? Infinity, ...mediaRects.map((rect) => rect.left)) - 2);
+        const top = Math.max(0, tabRect ? tabTop : Math.min(...mediaRects.map((rect) => rect.top)) - 16);
+        const right = Math.min(viewportWidth, Math.max(...mediaRects.map((rect) => rect.right)) + 2);
+        const bottom = Math.min(viewportHeight, Math.max(...mediaRects.map((rect) => rect.bottom)) + 36);
+        const width = right - left;
+        const height = bottom - top;
+        if (width < 240 || height < 180) return null;
+        return { x: left, y: top, width, height, viewportWidth, viewportHeight };
+      }
+      const crop = worksCropRect();
 
       function findSignature(obj) {
         if (obj === null || obj === undefined) return "";
@@ -517,15 +561,15 @@ async function captureCurrentView() {
         if (!data) continue;
         const sig = findSignature(data);
         if (sig) {
-          return { url: location.href, title: document.title, profileDetail: sig };
+          return { url: location.href, title: document.title, profileDetail: sig, crop };
         }
       }
 
       let sig = extractSignatureFromRenderData();
-      if (sig) return { url: location.href, title: document.title, profileDetail: sig };
+      if (sig) return { url: location.href, title: document.title, profileDetail: sig, crop };
 
       sig = extractSignatureFromScripts();
-      if (sig) return { url: location.href, title: document.title, profileDetail: sig };
+      if (sig) return { url: location.href, title: document.title, profileDetail: sig, crop };
 
       // Fallback: 通过页面点击「更多」获取（不依赖接口）
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -575,7 +619,7 @@ async function captureCurrentView() {
         .filter((text) => text && text.length >= 4)
         .sort((a, b) => b.length - a.length)[0] || "";
 
-      return { url: location.href, title: document.title, profileDetail: detail };
+      return { url: location.href, title: document.title, profileDetail: detail, crop };
     }
   });
   const profile = profileResult?.result || {};
@@ -583,7 +627,8 @@ async function captureCurrentView() {
   setStatus("正在截取当前抖音界面...", 55);
   const response = await chrome.runtime.sendMessage({
     type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
-    tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url }
+    tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url },
+    crop: profile.crop
   });
   if (!response?.ok) throw new Error(response?.error || "当前界面截图失败");
 
