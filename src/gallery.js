@@ -489,9 +489,24 @@ function renderTagFilterOptions() {
 
 function renderContent() {
   const groups = groupedFolders(state.accounts);
-  const ordered = state.folder === "全部"
-    ? [...groups.entries()]
-    : (groups.has(state.folder) ? [[state.folder, groups.get(state.folder)]] : []);
+
+  /* 「全部」模式：不按分类分组，全部平铺 */
+  if (state.folder === "全部") {
+    const all = state.accounts.filter(matchFilters);
+    if (!all.length) {
+      els.content.innerHTML = `<div class="empty">没有匹配的账号。试试「重置」清空筛选条件。</div>`;
+      return;
+    }
+    els.content.innerHTML = `<div class="gallery">${all.map(renderCard).join("")}</div>`;
+    bindCardEvents();
+    updateBatchCount();
+    lazyLoadShots();
+    return;
+  }
+
+  const ordered = groups.has(state.folder)
+    ? [[state.folder, groups.get(state.folder)]]
+    : [];
 
   const visibleGroups = ordered
     .map(([name, list]) => [name, list.filter(matchFilters)])
