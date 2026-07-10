@@ -376,10 +376,10 @@ function readFileAsDataUrl(file) {
 
 function ensureTags(account) {
   const tags = Array.isArray(account.tags) ? account.tags.slice() : [];
-  /* 仅在完全无 AI 标签时才插入；优先复用已有首个标签名作为 AI 名，避免用陈旧 category 覆盖用户已编辑的标签 */
-  if (!tags.some((t) => t.source === "ai")) {
-    const aiName = tags[0]?.name || account.category || "未分类";
-    tags.unshift({ name: aiName, source: "ai" });
+  /* 仅在完全无标签时才补默认值（向后兼容老数据）；
+     用户主动删除所有标签或删除 AI 标签后，不再自动补回 AI 标签 */
+  if (tags.length === 0) {
+    tags.push({ name: account.category || "未分类", source: "ai" });
   }
   return tags.slice(0, MAX_TAGS);
 }
