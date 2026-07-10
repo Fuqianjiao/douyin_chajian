@@ -848,7 +848,7 @@ h3.nickname:focus-visible {
 }
 
 .note-image-add {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
   width: 74px;
@@ -859,18 +859,21 @@ h3.nickname:focus-visible {
   color: var(--muted);
   cursor: pointer;
   font-size: 12px;
-  transition: border-color 0.15s, color 0.15s;
+  transition: border-color 0.15s, color 0.15s, background 0.15s, transform 0.1s;
+  user-select: none;
 }
 
 .note-image-add:hover {
   border-color: var(--cyan);
   color: var(--cyan);
+  background: rgba(0, 212, 255, .04);
+  transform: scale(1.03);
 }
 
 .plus-sign {
-  font-size: 28px;
+  font-size: 32px;
   line-height: 1;
-  font-weight: 300;
+  font-weight: 200;
 }
 
 .note-preview {
