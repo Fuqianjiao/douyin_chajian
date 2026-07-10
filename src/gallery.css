@@ -967,18 +967,6 @@ h3.nickname:focus-visible {
   opacity: 0.6;
 }
 
-/* 标签待删除状态（保存前暂态） */
-.editor-tag.pending-removal {
-  opacity: 0.4;
-  text-decoration: line-through;
-  text-decoration-color: rgba(255, 47, 99, .6);
-  border-color: rgba(255, 47, 99, .25) !important;
-}
-
-.editor-tag.pending-removal button {
-  color: var(--accent);
-}
-
 .hint {
   color: var(--muted);
   font-size: 12px;
