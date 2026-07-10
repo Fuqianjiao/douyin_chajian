@@ -994,6 +994,10 @@ h3.nickname:focus-visible {
   width: min(460px, 100%);
 }
 
+#confirmModal {
+  z-index: 40;
+}
+
 .confirm-message {
   color: var(--muted);
   line-height: 1.6;
