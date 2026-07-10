@@ -185,3 +185,59 @@ progress {
   font-size: 12px;
   font-weight: 900;
 }
+
+.shot-log {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.shot-log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.shot-log-head strong {
+  font-size: 14px;
+  font-weight: 900;
+  color: var(--text);
+}
+
+.shot-log-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: right;
+  word-break: break-all;
+}
+
+.shot-log-list {
+  max-height: 200px;
+  overflow: auto;
+  display: grid;
+  gap: 4px;
+  padding-right: 4px;
+}
+
+.shot-log-line {
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 700;
+  word-break: break-all;
+}
+
+.shot-log-line.success {
+  color: var(--cyan);
+}
+
+.shot-log-line.failure {
+  color: var(--pink);
+}
+
+.shot-log-line.info {
+  color: var(--muted);
+}
