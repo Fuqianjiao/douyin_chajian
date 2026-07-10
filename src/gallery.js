@@ -179,9 +179,21 @@ function waitForTabComplete(tabId, timeoutMs = 10000) {
 }
 
 async function focusTabForCapture(tabId, windowId) {
-  await chrome.windows.update(windowId, { focused: true });
-  await chrome.tabs.update(tabId, { active: true });
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  /* 重试机制：浏览器在拖拽标签等操作时会拒绝 tabs.update */
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await chrome.windows.update(windowId, { focused: true });
+      await chrome.tabs.update(tabId, { active: true });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return;
+    } catch (err) {
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 /* 安全检查标签页是否仍有效（避免 "No tab with id" 错误导致整个循环崩溃） */
@@ -1043,9 +1055,12 @@ function bindEvents() {
         await new Promise((r) => setTimeout(r, 2000));
         if (!(await tabStillValid(tab.id))) throw new Error("渲染等待期间标签丢失");
 
-        // 3. 提取 signature（不点击「更多」按钮）
+        // 3. 提取 signature（不点击「更多」按钮）— 带重试（权限/状态可能不稳定）
         if (!(await tabStillValid(tab.id))) throw new Error("注入脚本前标签丢失");
-        const [profileResult] = await chrome.scripting.executeScript({
+        let profileResult;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const results = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
             const normalize = (v) => String(v || "").replace(/\s+/g, " ").trim();
@@ -1143,7 +1158,17 @@ function bindEvents() {
             return { url: location.href, profileDetail: "", crop };
           }
         });
-        const profile = profileResult?.result || {};
+        profileResult = { result: (results || [])[0]?.result };
+        break;
+      } catch (scriptErr) {
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        throw scriptErr;
+      }
+    }
+    const profile = profileResult?.result || {};
 
         // 3.5 截图前确保标签是激活的
         if (!(await tabStillValid(tab.id))) throw new Error("截图聚焦前标签丢失");
