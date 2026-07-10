@@ -184,6 +184,17 @@ async function focusTabForCapture(tabId, windowId) {
   await new Promise((resolve) => setTimeout(resolve, 500));
 }
 
+/* 安全检查标签页是否仍有效（避免 "No tab with id" 错误导致整个循环崩溃） */
+async function tabStillValid(tabId) {
+  if (!tabId) return false;
+  try {
+    const t = await chrome.tabs.get(tabId);
+    return !t.discarded;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
@@ -1016,16 +1027,24 @@ function bindEvents() {
 
       let tab = null;
       try {
-        // 1. 打开博主主页（激活标签，captureVisibleTab 只能截激活标签）
+        // 1. 打开博主主页
         tab = await chrome.tabs.create({ url: account.homeUrl, active: true });
-        await focusTabForCapture(tab.id, tab.windowId);
+        // 创建后短暂等待 + 验证标签页仍存在（防止被拦截/重定向导致立即关闭）
+        await new Promise((r) => setTimeout(r, 800));
+        if (!(await tabStillValid(tab.id))) throw new Error("标签页创建后即丢失，可能被浏览器拦截或 URL 无效");
 
-        // 2. 等待页面加载完成
-        await waitForTabComplete(tab.id, 10000);
-        // 额外等待视觉渲染（激活标签需要渲染到屏幕才能截到）
-        await new Promise((r) => setTimeout(r, 1500));
+        // 2. 激活标签页并等待加载完成
+        await focusTabForCapture(tab.id, tab.windowId);
+        if (!(await tabStillValid(tab.id))) throw new Error("激活标签后丢失");
+        await waitForTabComplete(tab.id, 12000);
+        if (!(await tabStillValid(tab.id))) throw new Error("页面加载期间标签丢失");
+
+        // 3. 额外等待视觉渲染（截图需要页面实际渲染到屏幕）
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!(await tabStillValid(tab.id))) throw new Error("渲染等待期间标签丢失");
 
         // 3. 提取 signature（不点击「更多」按钮）
+        if (!(await tabStillValid(tab.id))) throw new Error("注入脚本前标签丢失");
         const [profileResult] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
@@ -1126,10 +1145,12 @@ function bindEvents() {
         });
         const profile = profileResult?.result || {};
 
-        // 3.5 截图前确保标签是激活的（captureVisibleTab 只截激活标签）
+        // 3.5 截图前确保标签是激活的
+        if (!(await tabStillValid(tab.id))) throw new Error("截图聚焦前标签丢失");
         await focusTabForCapture(tab.id, tab.windowId);
 
         // 4. 截图（调用 background.js）
+        if (!(await tabStillValid(tab.id))) throw new Error("截图时标签丢失");
         const response = await chrome.runtime.sendMessage({
           type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
           tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url },
