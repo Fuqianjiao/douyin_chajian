@@ -1,5 +1,4 @@
 const MAX_TAGS = 6;
-const MIN_AI_TAGS = 1;
 
 /* ─── IndexedDB: 截图存储 ─── */
 const SCREENSHOT_DB_NAME = "DouyinGalleryScreenshots";
@@ -745,13 +744,7 @@ function removeTagInEditor(index) {
   const target = tags[index];
   if (!target) return;
 
-  /* AI 标签：至少保留 1 个 */
-  if (target.source === "ai" && tags.filter((t) => t.source === "ai").length <= MIN_AI_TAGS) {
-    showToast("不能删除", "至少保留 1 个 AI 标签");
-    return;
-  }
-
-  /* 至少保留 1 个标签总数 */
+  /* 至少保留 1 个标签（不区分 AI/人工） */
   if (tags.length <= 1) {
     showToast("不能删除", "每个博主至少需要保留 1 个标签");
     return;
@@ -873,14 +866,10 @@ function batchRemoveTags() {
     const account = state.accounts.find((a) => a.id === id);
     if (!account) continue;
     let tags = ensureTags(account);
-    const aiCount = tags.filter((t) => t.source === "ai").length;
-    const willRemoveAi = tags.filter((t) => t.source === "ai" && state.batchTagSelected.has(t.name)).length;
-    if (aiCount - willRemoveAi < MIN_AI_TAGS) {
-      // 不允许把 AI 标签删到 0
-      continue;
-    }
     const before = tags.length;
-    tags = tags.filter((t) => !state.batchTagSelected.has(t.name));
+    const after = tags.filter((t) => !state.batchTagSelected.has(t.name));
+    if (after.length < 1) continue; /* 至少保留 1 个标签 */
+    tags = after;
     removed += before - tags.length;
     account.tags = tags;
     account.category = tags[0]?.name || "未分类";
