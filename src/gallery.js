@@ -293,9 +293,6 @@ const state = {
   logs: []
 };
 
-/** 确认弹窗回调（confirmDelete / batchDeleteAccounts 设置，confirmOk 点击时调用） */
-let _confirmCallback = null;
-
 function escapeHtml(value) {
   return String(value || "")
     .replace(/&/g, "&amp;")
@@ -836,7 +833,7 @@ function confirmDelete(accountId) {
   els.confirmTitle.textContent = "删除账号";
   els.confirmMessage.textContent = `确认从本地存储删除「${account.nickname}」？此操作不可撤销。`;
   els.confirmModal.hidden = false;
-  _confirmCallback = () => {
+  els.confirmOk.onclick = () => {
     state.accounts = state.accounts.filter((a) => a.id !== accountId);
     state.batchSelected.delete(accountId);
     persist();
@@ -845,9 +842,7 @@ function confirmDelete(accountId) {
     els.confirmModal.hidden = true;
     showToast("已删除", `「${account.nickname}」已从本地移除`);
     addLog(`删除账号：${account.nickname}`, "failure");
-    _confirmCallback = null;
   };
-  els.confirmModal.hidden = false;
 }
 
 function renderBatchTags() {
@@ -922,7 +917,8 @@ function batchDeleteAccounts() {
   }
   els.confirmTitle.textContent = "批量删除";
   els.confirmMessage.textContent = `确认删除 ${state.batchSelected.size} 个账号？此操作不可撤销。`;
-  _confirmCallback = () => {
+  els.confirmModal.hidden = false;
+  els.confirmOk.onclick = () => {
     const count = state.batchSelected.size;
     state.accounts = state.accounts.filter((a) => !state.batchSelected.has(a.id));
     state.batchSelected.clear();
@@ -932,9 +928,7 @@ function batchDeleteAccounts() {
     els.confirmModal.hidden = true;
     showToast("批量删除完成", `已删除 ${count} 个账号`);
     addLog(`批量删除：${count} 个账号`, "failure");
-    _confirmCallback = null;
   };
-  els.confirmModal.hidden = false;
 }
 
 async function persist() {
@@ -1312,14 +1306,7 @@ function bindEvents() {
     renderNotePreview();
   });
 
-  els.confirmCancel.addEventListener("click", () => { els.confirmModal.hidden = true; _confirmCallback = null; });
-  els.confirmOk.addEventListener("click", () => {
-    if (_confirmCallback) {
-      try { _confirmCallback(); } catch (e) { console.error("确认操作失败:", e); }
-    } else {
-      els.confirmModal.hidden = true;
-    }
-  });
+  els.confirmCancel.addEventListener("click", () => { els.confirmModal.hidden = true; });
 }
 
 /** 旧中文分类名 → 新紧凑英文映射（v0.1.37 一次性迁移） */
