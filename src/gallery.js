@@ -393,7 +393,7 @@ function ensureTags(account) {
   let tags = Array.isArray(account.tags) ? account.tags.slice() : [];
   /* 仅在完全无标签时才补默认值 */
   if (tags.length === 0) {
-    tags.push({ name: account.category || "Uncategorized", source: "ai" });
+    tags.push({ name: account.category || "未分类", source: "ai" });
   }
   return deduplicateTags(tags);
 }
@@ -800,20 +800,20 @@ function addTagInEditor() {
   if (!account) return;
   const rawName = els.tagInput.value.trim();
   if (!rawName) return;
-  const name = migrateCategoryName(rawName); /* 中文→英文迁移 */
+  const name = rawName; /* 保持原始输入，不做英文迁移 */
   const tags = ensureTags(account);
   if (tags.length >= MAX_TAGS) {
     showToast("标签已满", `最多 ${MAX_TAGS} 个`);
     return;
   }
-  /* 去重检查：用迁移后的名字比较 */
-  if (tags.some((t) => migrateCategoryName(t.name) === name)) {
+  /* 去重检查 */
+  if (tags.some((t) => t.name === name)) {
     showToast("已存在", `标签「${name}」已存在`);
     return;
   }
   tags.push({ name, source: "human" });
   account.tags = deduplicateTags(tags);
-  account.category = tags[0]?.name || "Uncategorized";
+  account.category = tags[0]?.name || "未分类";
   els.tagInput.value = "";
   renderEditorTags();
 }
@@ -831,7 +831,7 @@ function saveEditor() {
 
   /* 关键修复：将编辑器中最终确定的标签和 category 同步写回账号对象 */
   account.tags = deduplicateTags(tags);
-  account.category = tags[0]?.name || "Uncategorized";
+  account.category = tags[0]?.name || "未分类";
 
   account.note = els.noteText.value.trim();
   account.noteImages = state.editingNoteImages.slice();
@@ -1419,6 +1419,15 @@ function migrateCategoryName(name) {
   return CATEGORY_NAME_MIGRATE[name] || name;
 }
 
+/** 反向映射：英文 → 中文（v0.1.41 回退英文化） */
+const ENGLISH_TO_CHINESE = Object.fromEntries(
+  Object.entries(CATEGORY_NAME_MIGRATE).map(([k, v]) => [v, k])
+);
+
+function toChinese(name) {
+  return ENGLISH_TO_CHINESE[name] || name;
+}
+
 (async function init() {
   bindEvents();
   const stored = await chrome.storage.local.get(["accounts"]);
@@ -1427,12 +1436,12 @@ function migrateCategoryName(name) {
   const originalAccountsJson = JSON.stringify(stored.accounts || []);
   state.accounts = (stored.accounts || []).map((a) => {
     let clean = cleanAccountIdentity(a);
-    /* 迁移旧中文分类名到紧凑英文 */
-    clean.category = migrateCategoryName(clean.category);
+    /* 英文标签回退到中文（v0.1.41 撤销英文化） */
+    clean.category = toChinese(clean.category);
     if (Array.isArray(clean.tags)) {
       clean.tags = clean.tags.map((t) => ({
         ...t,
-        name: migrateCategoryName(t.name)
+        name: toChinese(t.name)
       }));
     }
     return { ...clean, tags: ensureTags(clean) };
