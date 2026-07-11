@@ -374,14 +374,28 @@ function readFileAsDataUrl(file) {
   });
 }
 
-function ensureTags(account) {
-  const tags = Array.isArray(account.tags) ? account.tags.slice() : [];
-  /* 仅在完全无标签时才补默认值（向后兼容老数据）；
-     用户主动删除所有标签或删除 AI 标签后，不再自动补回 AI 标签 */
-  if (tags.length === 0) {
-    tags.push({ name: account.category || "未分类", source: "ai" });
+function deduplicateTags(tags) {
+  /* 按标签名合并去重：同名标签只保留一个，人工优先于AI */
+  const map = new Map();
+  for (const t of tags) {
+    const name = (t.name || "").trim();
+    if (!name) continue;
+    const existing = map.get(name);
+    /* 人工标签优先保留，或首次出现的 */
+    if (!existing || (t.source === "human" && existing.source !== "human")) {
+      map.set(name, { ...t, name });
+    }
   }
-  return tags.slice(0, MAX_TAGS);
+  return [...map.values()].slice(0, MAX_TAGS);
+}
+
+function ensureTags(account) {
+  let tags = Array.isArray(account.tags) ? account.tags.slice() : [];
+  /* 仅在完全无标签时才补默认值 */
+  if (tags.length === 0) {
+    tags.push({ name: account.category || "Uncategorized", source: "ai" });
+  }
+  return deduplicateTags(tags);
 }
 
 function allTagNames() {
@@ -784,20 +798,22 @@ function removeTagInEditor(index) {
 function addTagInEditor() {
   const account = state.accounts.find((a) => a.id === state.editingAccountId);
   if (!account) return;
-  const name = els.tagInput.value.trim();
-  if (!name) return;
+  const rawName = els.tagInput.value.trim();
+  if (!rawName) return;
+  const name = migrateCategoryName(rawName); /* 中文→英文迁移 */
   const tags = ensureTags(account);
   if (tags.length >= MAX_TAGS) {
     showToast("标签已满", `最多 ${MAX_TAGS} 个`);
     return;
   }
-  if (tags.some((t) => t.name === name)) {
+  /* 去重检查：用迁移后的名字比较 */
+  if (tags.some((t) => migrateCategoryName(t.name) === name)) {
     showToast("已存在", `标签「${name}」已存在`);
     return;
   }
   tags.push({ name, source: "human" });
-  account.tags = tags;
-  account.category = tags[0]?.name || account.category || "未分类";
+  account.tags = deduplicateTags(tags);
+  account.category = tags[0]?.name || "Uncategorized";
   els.tagInput.value = "";
   renderEditorTags();
 }
@@ -814,8 +830,8 @@ function saveEditor() {
   }
 
   /* 关键修复：将编辑器中最终确定的标签和 category 同步写回账号对象 */
-  account.tags = tags;
-  account.category = tags[0]?.name || account.category || "未分类";
+  account.tags = deduplicateTags(tags);
+  account.category = tags[0]?.name || "Uncategorized";
 
   account.note = els.noteText.value.trim();
   account.noteImages = state.editingNoteImages.slice();
@@ -1309,8 +1325,9 @@ function bindEvents() {
   els.confirmCancel.addEventListener("click", () => { els.confirmModal.hidden = true; });
 }
 
-/** 旧中文分类名 → 新紧凑英文映射（v0.1.37 一次性迁移） */
+/** 中文标签 → 紧凑英文映射（一次性迁移 + 运行时兼容） */
 const CATEGORY_NAME_MIGRATE = {
+  /* 系统分类名（9个） */
   "美食与生活方式": "Lifestyle",
   "知识职场与产品": "Business",
   "舞蹈音乐与表演": "Dance",
@@ -1319,7 +1336,83 @@ const CATEGORY_NAME_MIGRATE = {
   "搞笑": "Funny",
   "明星": "Celebrity",
   "运动": "Sports",
-  "非博主": "Brand"
+  "非博主": "Brand",
+  /* 常见中文标签 → 英文 */
+  "未分类": "Uncategorized",
+  "舞蹈": "Dance",
+  "口播": "Talk",
+  "职场": "Business",
+  "剪辑干货": "Editing",
+  "美食": "Food",
+  "穿搭": "Fashion",
+  "生活": "Lifestyle",
+  "日常": "Daily",
+  "旅行": "Travel",
+  "家居": "Home",
+  "好物": "Goods",
+  "学习": "Study",
+  "知识": "Knowledge",
+  "创业": "Startup",
+  "产品": "Product",
+  "运营": "Ops",
+  "编程": "Coding",
+  "设计": "Design",
+  "读书": "Reading",
+  "音乐": "Music",
+  "唱歌": "Singing",
+  "翻唱": "Cover",
+  "乐器": "Instrument",
+  "表演": "Performance",
+  "才艺": "Talent",
+  "街舞": "HipHop",
+  "颜值": "Visual",
+  "美妆": "Makeup",
+  "护肤": "Skincare",
+  "变装": "Cosplay",
+  "拍照": "Photo",
+  "写真": "Portrait",
+  "模特": "Model",
+  "校园": "Campus",
+  "大学": "College",
+  "学生": "Student",
+  "青春": "Youth",
+  "搞笑": "Funny",
+  "段子": "Comedy",
+  "幽默": "Humor",
+  "整活": "Fun",
+  "沙雕": "Meme",
+  "吐槽": "Roast",
+  "健身": "Fitness",
+  "跑步": "Running",
+  "篮球": "Basketball",
+  "足球": "Football",
+  "瑜伽": "Yoga",
+  "减脂": "FatLoss",
+  "训练": "Training",
+  "vlog": "Vlog",
+  "探店": "Shop",
+  "做饭": "Cooking",
+  "烘焙": "Baking",
+  "咖啡": "Coffee",
+  "饮品": "Drink",
+  "收纳": "Organize",
+  "效率": "Efficiency",
+  "AI": "AI",
+  "课程": "Course",
+  "财经": "Finance",
+  "演员": "Actor",
+  "爱豆": "Idol",
+  "综艺": "Variety",
+  "娱乐": "Entertainment",
+  "追星": "Fan",
+  "饭圈": "Fandom",
+  "企业号": "Official",
+  "官方": "Official",
+  "旗舰店": "Flagship",
+  "客服": "Service",
+  "品牌": "Brand",
+  "商家": "Merchant",
+  "店铺": "Store"
 };
 
 function migrateCategoryName(name) {
