@@ -473,10 +473,12 @@ async function collectWaterfall() {
 
 async function captureCurrentView() {
   const tab = await activeDouyinTab();
-  setStatus("正在读取主页 signature...", 25);
-  const [profileResult] = await chrome.scripting.executeScript({
+
+  /* ═══ 第一步：计算截图区域 + 从静态数据源提取 signature（不点击"更多"，保持页面原样）═══ */
+  setStatus("正在计算截图区域...", 15);
+  const [preCaptureResult] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: async () => {
+    func: () => {
       const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
       function worksCropRect() {
         const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
@@ -526,18 +528,11 @@ async function captureCurrentView() {
       function findSignature(obj) {
         if (obj === null || obj === undefined) return "";
         if (typeof obj === "string") {
-          try {
-            obj = JSON.parse(obj);
-          } catch {
-            return "";
-          }
+          try { obj = JSON.parse(obj); } catch { return ""; }
         }
         if (typeof obj !== "object") return "";
         if (Array.isArray(obj)) {
-          for (const item of obj) {
-            const found = findSignature(item);
-            if (found) return found;
-          }
+          for (const item of obj) { const found = findSignature(item); if (found) return found; }
           return "";
         }
         if (obj.signature && typeof obj.signature === "string") {
@@ -550,34 +545,7 @@ async function captureCurrentView() {
         return "";
       }
 
-      function extractSignatureFromScripts() {
-        const scripts = [...document.querySelectorAll("script")];
-        for (const script of scripts) {
-          const text = script.textContent || "";
-          if (!text.includes("signature")) continue;
-          try {
-            const parsed = JSON.parse(text);
-            const sig = findSignature(parsed);
-            if (sig) return sig;
-          } catch {}
-          const match = text.match(/"signature"\s*:\s*"([^"]{4,300})"/);
-          if (match) return normalize(match[1]).replace(/\\n/g, " ");
-        }
-        return "";
-      }
-
-      function extractSignatureFromRenderData() {
-        const el = document.getElementById("RENDER_DATA") || document.getElementById("SSR_HYDRATED_DATA");
-        if (el) {
-          try {
-            const text = decodeURIComponent(el.textContent || "");
-            return findSignature(JSON.parse(text));
-          } catch {}
-        }
-        return "";
-      }
-
-      // 优先从全局变量和页面数据取 signature
+      /* 从全局变量 / RENDER_DATA / script 标签中提取 signature（纯读取，不操作 DOM） */
       const globalCandidates = [
         window.__INITIAL_STATE__,
         window._SSR_HYDRATED_DATA,
@@ -587,90 +555,116 @@ async function captureCurrentView() {
       for (const data of globalCandidates) {
         if (!data) continue;
         const sig = findSignature(data);
-        if (sig) {
-          return { url: location.href, title: document.title, profileDetail: sig, crop };
-        }
+        if (sig) return { url: location.href, title: document.title, profileDetail: sig, crop };
       }
 
-      let sig = extractSignatureFromRenderData();
-      if (sig) return { url: location.href, title: document.title, profileDetail: sig, crop };
-
-      sig = extractSignatureFromScripts();
-      if (sig) return { url: location.href, title: document.title, profileDetail: sig, crop };
-
-      // Fallback: 通过页面点击「更多」获取（不依赖接口）
-      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const visible = (element) => {
-        if (!element) return false;
-        const rect = element.getBoundingClientRect();
-        const style = getComputedStyle(element);
-        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-      };
-      const fire = (element, type) => {
-        element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-      };
-
-      const moreTargets = [...document.querySelectorAll("button, span, div, a")]
-        .filter(visible)
-        .filter((node) => normalize(node.textContent) === "更多");
-
-      for (const target of moreTargets.slice(0, 3)) {
-        fire(target, "mouseover");
-        fire(target, "mouseenter");
-        fire(target, "mousemove");
-        target.click?.();
-        await wait(180);
+      let el = document.getElementById("RENDER_DATA") || document.getElementById("SSR_HYDRATED_DATA");
+      if (el) {
+        try {
+          const sig = findSignature(JSON.parse(decodeURIComponent(el.textContent || "")));
+          if (sig) return { url: location.href, title: document.title, profileDetail: sig, crop };
+        } catch {}
       }
-      await wait(450);
 
-      const blocked = /关注|粉丝|获赞|作品|推荐|喜欢|收藏|私密作品|合集|短剧|搜索|分享主页|下载|客户端|已关注|私信/;
-      const tooltipTexts = [...document.querySelectorAll("[role='tooltip'], .semi-tooltip, .semi-tooltip-content, .semi-popover, .semi-portal-inner")]
-        .filter(visible)
-        .map((node) => normalize(node.innerText || node.textContent))
-        .filter((text) => text && text !== "更多" && text.length <= 260)
-        .filter((text) => !blocked.test(text) || /[@#｜|，,。.!！?？]/.test(text));
+      const scripts = [...document.querySelectorAll("script")];
+      for (const script of scripts) {
+        const text = script.textContent || "";
+        if (!text.includes("signature")) continue;
+        const match = text.match(/"signature"\s*:\s*"([^"]{4,300})"/);
+        if (match) return { url: location.href, title: document.title, profileDetail: normalize(match[1]).replace(/\\n/g, " "), crop };
+      }
 
-      const profileRegion = [...document.querySelectorAll("main, header, section, div")]
-        .filter(visible)
-        .map((node) => normalize(node.innerText || node.textContent))
-        .filter((text) => text.includes("抖音号") && text.length <= 900)
-        .sort((a, b) => a.length - b.length)[0] || "";
-      const inlineMatch = profileRegion.match(/(?:IP属地[:：]?\s*\S+\s*)?(.{4,180}?)(?:\s*更多|\s*作品|\s*推荐|\s*喜欢|$)/);
-      const inlineBio = normalize(inlineMatch?.[1] || "")
-        .replace(/^.*?抖音号[:：]?\s*[A-Za-z0-9_.-]+\s*/i, "")
-        .replace(/^IP属地[:：]?\s*\S+\s*/, "");
-
-      const detail = tooltipTexts
-        .concat(inlineBio)
-        .map((text) => text.replace(/^更多\s*/, "").trim())
-        .filter((text) => text && text.length >= 4)
-        .sort((a, b) => b.length - a.length)[0] || "";
-
-      return { url: location.href, title: document.title, profileDetail: detail, crop };
+      /* 静态数据源都找不到，返回空 profileDetail（后续会通过"更多"补充） */
+      return { url: location.href, title: document.title, profileDetail: "", crop };
     }
   });
-  const profile = profileResult?.result || {};
+  const preCapture = preCaptureResult?.result || {};
 
-  setStatus("正在截取当前抖音界面...", 55);
+  /* ═══ 第二步：先截图！（此时页面未被修改，"更多"处于收起状态，头像完整可见）═══ */
+  setStatus("正在截取当前界面...", 45);
   const response = await chrome.runtime.sendMessage({
     type: "DOUYIN_GALLERY_CAPTURE_ACTIVE_TAB",
     tab: { id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url },
-    crop: profile.crop
+    crop: preCapture.crop
   });
   if (!response?.ok) throw new Error(response?.error || "当前界面截图失败");
 
-  const matchedAccount = findAccountByUrl(profile.url || tab.url);
+  /* ═══ 第三步：截图已完成，现在才点击"更多"读取详细备注（不影响已完成的截图）═══ */
+  let profileDetail = preCapture.profileDetail || "";
+  if (!profileDetail) {
+    setStatus("正在读取主页详细介绍...", 70);
+    const [postCaptureResult] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async () => {
+        const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const visible = (element) => {
+          if (!element) return false;
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        };
+        const fire = (element, type) => {
+          element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+        };
+
+        /* 找到并点击「更多」按钮 */
+        const moreTargets = [...document.querySelectorAll("button, span, div, a")]
+          .filter(visible)
+          .filter((node) => normalize(node.textContent) === "更多");
+
+        for (const target of moreTargets.slice(0, 3)) {
+          fire(target, "mouseover");
+          fire(target, "mouseenter");
+          fire(target, "mousemove");
+          target.click?.();
+          await wait(180);
+        }
+        await wait(450);
+
+        /* 从 tooltip / popover 中读取详细介绍 */
+        const blocked = /关注|粉丝|获赞|作品|推荐|喜欢|收藏|私密作品|合集|短剧|搜索|分享主页|下载|客户端|已关注|私信/;
+        const tooltipTexts = [...document.querySelectorAll("[role='tooltip'], .semi-tooltip, .semi-tooltip-content, .semi-popover, .semi-portal-inner")]
+          .filter(visible)
+          .map((node) => normalize(node.innerText || node.textContent))
+          .filter((text) => text && text !== "更多" && text.length <= 260)
+          .filter((text) => !blocked.test(text) || /[@#｜|，,。.!！?？]/.test(text));
+
+        /* 从页面文本内联区域读取 */
+        const profileRegion = [...document.querySelectorAll("main, header, section, div")]
+          .filter(visible)
+          .map((node) => normalize(node.innerText || node.textContent))
+          .filter((text) => text.includes("抖音号") && text.length <= 900)
+          .sort((a, b) => a.length - b.length)[0] || "";
+        const inlineMatch = profileRegion.match(/(?:IP属地[:：]?\s*\S+\s*)?(.{4,180}?)(?:\s*更多|\s*作品|\s*推荐|\s*喜欢|$)/);
+        const inlineBio = normalize(inlineMatch?.[1] || "")
+          .replace(/^.*?抖音号[:：]?\s*[A-Za-z0-9_.-]+\s*/i, "")
+          .replace(/^IP属地[:：]?\s*\S+\s*/, "");
+
+        const detail = tooltipTexts
+          .concat(inlineBio)
+          .map((text) => text.replace(/^更多\s*/, "").trim())
+          .filter((text) => text && text.length >= 4)
+          .sort((a, b) => b.length - a.length)[0] || "";
+
+        return { url: location.href, profileDetail: detail };
+      }
+    });
+    profileDetail = postCaptureResult?.result?.profileDetail || "";
+  }
+
+  /* ═══ 第四步：绑定账号并保存截图 + 备注═══ */
+  const matchedAccount = findAccountByUrl(preCapture.url || tab.url);
   if (matchedAccount) {
     response.shot.accountId = matchedAccount.id;
     response.shot.accountNickname = matchedAccount.nickname;
-    if (profile.profileDetail) {
-      matchedAccount.note = upsertProfileNote(matchedAccount.note, profile.profileDetail);
-      matchedAccount.profileDetail = profile.profileDetail;
+    if (profileDetail) {
+      matchedAccount.note = upsertProfileNote(matchedAccount.note, profileDetail);
+      matchedAccount.profileDetail = profileDetail;
       matchedAccount.profileDetailSyncedAt = new Date().toISOString();
     }
-    // 截图存 IndexedDB（关联到账号）
     await saveScreenshotToDB(matchedAccount, response.shot.screenshotDataUrl, response.shot.capturedAt, [
-      profile.url,
+      preCapture.url,
       response.shot.url,
       tab.url
     ]);
@@ -682,18 +676,16 @@ async function captureCurrentView() {
     state.screenshotCount = await countScreenshotsInDB();
     await saveState();
   } else {
-    // 未关联账号 → 不存截图（截图只绑定到已有账号才有效）
     state.screenshotCount = await countScreenshotsInDB();
   }
-  // 清零旧 pageShots 数据
   await clearOldPageShots();
 
-  if (matchedAccount && profile.profileDetail) {
-    setStatus(`已截图，绑定「${matchedAccount.nickname}」并同步 signature 到备注。`, 100);
+  if (matchedAccount && profileDetail) {
+    setStatus(`已截图，绑定「${matchedAccount.nickname}」并同步备注。`, 100);
   } else if (matchedAccount) {
-    setStatus(`已截图并绑定「${matchedAccount.nickname}」，未读取到 signature。`, 100);
+    setStatus(`已截图并绑定「${matchedAccount.nickname}」，未读取到备注。`, 100);
   } else {
-    const key = profileKey(profile.url || tab.url) || "无链接 key";
+    const key = profileKey(preCapture.url || tab.url) || "无链接 key";
     setStatus(`当前界面未匹配到已采集账号（${key}），截图仅绑定成功时才保存。`, 100);
   }
 }
