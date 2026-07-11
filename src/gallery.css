@@ -83,6 +83,48 @@ button:disabled {
   font-weight: 700;
 }
 
+/* ─── 导出下拉菜单 ─── */
+.export-dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.export-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  min-width: 200px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .4);
+  padding: 6px;
+}
+
+.export-menu[hidden] {
+  display: none;
+}
+
+.export-menu button {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 14px;
+  text-align: left;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.export-menu button:hover {
+  background: rgba(255, 255, 255, .06);
+}
+
 #batchMode.active {
   border-color: var(--cyan);
   color: var(--cyan);
@@ -384,6 +426,62 @@ textarea {
 
 .delete-card:hover {
   background: rgba(255, 47, 99, .18);
+}
+
+/* ─── 收藏按钮（星形）─── */
+.star-card {
+  position: absolute;
+  top: 10px;
+  right: 46px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin: 0;
+  border-color: rgba(255, 255, 255, .18);
+  border-radius: 50%;
+  background: rgba(16, 17, 20, .82);
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity .16s ease, transform .16s ease, background .16s ease, color .16s ease;
+  backdrop-filter: blur(10px);
+  color: var(--muted-2);
+}
+
+.card:hover .star-card,
+.card:focus-within .star-card {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.star-card:hover {
+  background: rgba(255, 200, 50, .12);
+  border-color: rgba(255, 200, 50, .35);
+}
+
+.star-card.starred {
+  opacity: 1;
+  color: #ffc832;
+  border-color: rgba(255, 200, 50, .38);
+  background: rgba(255, 200, 50, .08);
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.star-card.starred:hover {
+  background: rgba(255, 200, 50, .18);
+}
+
+/* 收藏卡片高亮边框 */
+.card.starred-card {
+  border-color: rgba(255, 200, 50, .35);
+  box-shadow: 0 0 0 1px rgba(255, 200, 50, .14);
 }
 
 .select-card {

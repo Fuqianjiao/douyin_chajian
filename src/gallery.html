@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>抖音起号学习画廊</title>
     <link rel="stylesheet" href="gallery.css">
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
   </head>
   <body>
     <main class="shell">
@@ -18,7 +19,14 @@
           <button id="batchMode" type="button">批量标签</button>
           <button id="stopShot" type="button" disabled>停止</button>
           <button id="logs" type="button">查看日志</button>
-          <button id="export" type="button">导出 JSON</button>
+          <div class="export-dropdown">
+            <button id="export" type="button">导出 ▾</button>
+            <div id="exportMenu" class="export-menu" hidden>
+              <button data-export="excel-current" type="button">📊 导出当前分类 Excel</button>
+              <button data-export="excel-all" type="button">📊 导出全部 Excel</button>
+              <button data-export="json" type="button">📋 导出 JSON</button>
+            </div>
+          </div>
         </div>
       </header>
       <div id="captureStatus" class="capture-status"></div>
@@ -53,6 +61,14 @@
           <label>
             备注内容
             <input id="noteSearch" type="search" placeholder="输入备注关键词">
+          </label>
+          <label>
+            收藏状态
+            <select id="starFilter">
+              <option value="">全部</option>
+              <option value="starred">仅已收藏</option>
+              <option value="unstarred">未收藏</option>
+            </select>
           </label>
           <div class="filter-actions">
             <button id="applyFilters" type="button">筛选</button>

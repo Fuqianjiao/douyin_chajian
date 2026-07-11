@@ -233,6 +233,7 @@ const els = {
   screenshotFilter: document.querySelector("#screenshotFilter"),
   noteFilter: document.querySelector("#noteFilter"),
   noteSearch: document.querySelector("#noteSearch"),
+  starFilter: document.querySelector("#starFilter"),
   applyFilters: document.querySelector("#applyFilters"),
   resetFilters: document.querySelector("#resetFilters"),
   folders: document.querySelector("#folders"),
@@ -251,6 +252,7 @@ const els = {
   stopShot: document.querySelector("#stopShot"),
   logs: document.querySelector("#logs"),
   export: document.querySelector("#export"),
+  exportMenu: document.querySelector("#exportMenu"),
   captureStatus: document.querySelector("#captureStatus"),
   toast: document.querySelector("#toast"),
   editorModal: document.querySelector("#editorModal"),
@@ -285,6 +287,7 @@ const state = {
   screenshotFilter: "",
   noteFilter: "",
   noteKeyword: "",
+  starFilter: "",
   batchMode: false,
   batchSelected: new Set(),
   batchTagSelected: new Set(),
@@ -486,6 +489,8 @@ function matchFilters(account) {
     const note = (account.note || "").toLowerCase();
     if (!note.includes(state.noteKeyword.toLowerCase())) return false;
   }
+  if (state.starFilter === "starred" && !account.starred) return false;
+  if (state.starFilter === "unstarred" && account.starred) return false;
   return true;
 }
 
@@ -496,6 +501,10 @@ function groupedFolders(accounts) {
     const key = tags[0]?.name || "未分类";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ ...account, tags });
+  }
+  /* 每组内按 followedAt 降序：最近关注的排前面 */
+  for (const [, list] of groups) {
+    list.sort((a, b) => (b.followedAt || "").localeCompare(a.followedAt || ""));
   }
   return groups;
 }
@@ -577,19 +586,21 @@ function renderCard(account) {
   const cachedShot = shotFor(account.id);
   const tags = ensureTags(account);
   const isSelected = state.batchSelected.has(account.id);
+  const isStarred = Boolean(account.starred);
   const shotHtml = cachedShot
     ? `<img src="${escapeHtml(cachedShot)}" alt="${escapeHtml(account.nickname)}">`
     : hasShot
       ? `<div class="shot-placeholder" data-shot-id="${escapeHtml(account.id)}">截图加载中...</div>`
       : `<span class="shot-empty">暂无截图</span>`;
   return `
-    <article class="card ${isSelected ? "batch-selected" : ""}" data-id="${escapeHtml(account.id)}">
+    <article class="card ${isSelected ? "batch-selected" : ""} ${isStarred ? "starred-card" : ""}" data-id="${escapeHtml(account.id)}">
       ${state.batchMode ? `
         <label class="select-card">
           <input type="checkbox" data-select="${escapeHtml(account.id)}" ${isSelected ? "checked" : ""}>
           选择
         </label>
       ` : ""}
+      <button class="star-card ${isStarred ? "starred" : ""}" data-star="${escapeHtml(account.id)}" title="${isStarred ? "取消收藏" : "添加收藏"}">${isStarred ? "★" : "☆"}</button>
       <button class="delete-card" data-delete="${escapeHtml(account.id)}" title="删除此账号">×</button>
       <a class="shot" href="${escapeHtml(account.homeUrl || "#")}" target="_blank" rel="noreferrer">
         ${shotHtml}
@@ -618,11 +629,27 @@ function renderCard(account) {
   `;
 }
 
+function toggleStar(accountId) {
+  const account = state.accounts.find((a) => a.id === accountId);
+  if (!account) return;
+  account.starred = !account.starred;
+  persist();
+  renderContent();
+  showToast(account.starred ? "已收藏" : "取消收藏", `「${account.nickname}」${account.starred ? "已加入特别关注" : "已从特别关注移除"}`);
+  addLog(`${account.starred ? "★ 收藏" : "☆ 取消收藏"}：${account.nickname}`, "success");
+}
+
 function bindCardEvents() {
   els.content.querySelectorAll("[data-delete]").forEach((btn) => {
     btn.addEventListener("click", (event) => {
       event.stopPropagation();
       confirmDelete(btn.dataset.delete);
+    });
+  });
+  els.content.querySelectorAll("[data-star]").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleStar(btn.dataset.star);
     });
   });
   els.content.querySelectorAll("[data-edit]").forEach((btn) => {
@@ -967,12 +994,14 @@ function resetFilters() {
   state.screenshotFilter = "";
   state.noteFilter = "";
   state.noteKeyword = "";
+  state.starFilter = "";
   state.folder = "全部";
   els.nameSearch.value = "";
   els.tagFilter.value = "";
   els.screenshotFilter.value = "";
   els.noteFilter.value = "";
   els.noteSearch.value = "";
+  els.starFilter.value = "";
   renderFolders();
   renderContent();
   addLog("重置所有筛选条件", "info");
@@ -994,6 +1023,7 @@ function bindEvents() {
     state.screenshotFilter = els.screenshotFilter.value;
     state.noteFilter = els.noteFilter.value;
     state.noteKeyword = els.noteSearch.value.trim();
+    state.starFilter = els.starFilter.value;
     renderContent();
     addLog("应用筛选", "info");
   });
@@ -1278,17 +1308,109 @@ function bindEvents() {
     els.logsModal.hidden = true;
   });
 
-  els.export.addEventListener("click", () => {
-    const data = JSON.stringify({ accounts: state.accounts }, null, 2);
-    const blob = new Blob([data], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `douyin-accounts-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    addLog("导出全部 JSON", "success");
+/* ─── 导出功能 ─── */
+function exportJson() {
+  const data = JSON.stringify({ accounts: state.accounts }, null, 2);
+  const blob = new Blob([data], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `douyin-accounts-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  addLog("导出全部 JSON", "success");
+}
+
+async function exportExcel(currentFolderOnly) {
+  /* 确定要导出的账号列表 */
+  let accounts;
+  if (currentFolderOnly && state.folder !== "全部") {
+    const groups = groupedFolders(state.accounts);
+    accounts = groups.get(state.folder) || [];
+    accounts = accounts.filter(matchFilters);
+  } else {
+    accounts = state.folder === "全部"
+      ? state.accounts.filter(matchFilters)
+      : (() => { const g = groupedFolders(state.accounts); return g.get(state.folder) || []; })().filter(matchFilters);
+  }
+
+  if (!accounts.length) {
+    showToast("无数据", currentFolderOnly ? "当前分类没有可导出的账号" : "没有可导出的账号");
+    return;
+  }
+
+  addLog(`正在生成 Excel（${accounts.length} 个账号）...`, "info");
+
+  /* 准备数据行 */
+  const rows = [];
+  for (const account of accounts) {
+    const clean = cleanAccountIdentity(account);
+    const tags = ensureTags(clean).map((t) => t.name).join("、");
+
+    /* 尝试获取截图 URL（优先从 IndexedDB） */
+    let shotUrl = "";
+    try {
+      const shot = await getShotFromDB(clean);
+      if (shot?.dataUrl) shotUrl = shot.dataUrl.slice(0, 100) + "..."; /* base64 截断显示 */
+    } catch {}
+
+    rows.push({
+      "博主名称": clean.nickname || "未命名",
+      "备注": (clean.note || "").replace(/\n/g, " "),
+      "博主链接": clean.homeUrl || "",
+      "博主主图(截图)": shotUrl || "(暂无截图)",
+      "标签": tags,
+      "收藏状态": clean.starred ? "★ 已收藏" : "",
+      "关注时间": clean.followedAt ? new Date(clean.followedAt).toLocaleString("zh-CN") : ""
+    });
+  }
+
+  /* 使用 SheetJS 生成 .xlsx */
+  if (typeof XLSX === "undefined") {
+    showToast("缺少库", "SheetJS 未加载，无法生成 Excel，请检查网络连接");
+    return;
+  }
+
+  const ws = XLSX.utils.json_to_sheet(rows);
+
+  /* 设置列宽 */
+  ws["!cols"] = [
+    { wch: 18 },  // 博主名称
+    { wch: 40 },  // 备注
+    { wch: 45 },  // 博客链接
+    { wch: 20 },  // 主图
+    { wch: 24 },  // 标签
+    { wch: 12 },  // 收藏
+    { wch: 20 }   // 关注时间
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, currentFolderOnly ? state.folder : "全部博主");
+
+  const filename = `douyin-${currentFolderOnly ? state.folder : "all"}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  XLSX.writeFile(wb, filename);
+
+  addLog(`导出 Excel 成功：${filename}（${rows.length} 行）`, "success");
+  showToast("导出成功", `${rows.length} 个账号已导出为 ${filename}`);
+}
+
+  els.export.addEventListener("click", (event) => {
+    event.stopPropagation();
+    els.exportMenu.hidden = !els.exportMenu.hidden;
   });
+
+  els.exportMenu.querySelectorAll("[data-export]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      els.exportMenu.hidden = true;
+      const mode = btn.dataset.export;
+      if (mode === "json") exportJson();
+      else if (mode === "excel-current") exportExcel(true);
+      else if (mode === "excel-all") exportExcel(false);
+    });
+  });
+
+  /* 点击外部关闭导出菜单 */
+  document.addEventListener("click", () => { els.exportMenu.hidden = true; });
 
   els.editorClose.addEventListener("click", () => { els.editorModal.hidden = true; });
   els.addTag.addEventListener("click", addTagInEditor);
@@ -1434,6 +1556,7 @@ function toChinese(name) {
   // 清零旧 pageShots 数据（一次性）
   await chrome.storage.local.remove("pageShots");
   const originalAccountsJson = JSON.stringify(stored.accounts || []);
+  let needsSave = false;
   state.accounts = (stored.accounts || []).map((a) => {
     let clean = cleanAccountIdentity(a);
     /* 英文标签回退到中文（v0.1.41 撤销英文化） */
@@ -1444,9 +1567,14 @@ function toChinese(name) {
         name: toChinese(t.name)
       }));
     }
+    /* 为旧数据补充 followedAt（v0.1.42 新增字段） */
+    if (!clean.followedAt) {
+      clean.followedAt = new Date().toISOString();
+      needsSave = true;
+    }
     return { ...clean, tags: ensureTags(clean) };
   });
-  if (originalAccountsJson !== JSON.stringify(state.accounts)) {
+  if (originalAccountsJson !== JSON.stringify(state.accounts) || needsSave) {
     await chrome.storage.local.set({ accounts: state.accounts });
   }
   // 加载截图 accountId 列表（轻量，只读 key 不读图片数据）

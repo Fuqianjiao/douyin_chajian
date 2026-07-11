@@ -308,9 +308,12 @@ function upsertProfileNote(existingNote, profileDetail) {
 }
 
 function mergeAccounts(existing, incoming) {
+  const now = new Date().toISOString();
   const map = new Map(existing.map((account) => [account.homeUrl, account]));
   for (const account of incoming) {
     const old = map.get(account.homeUrl) || {};
+    /* 保留已有的 followedAt（首次采集时间不变） */
+    const followedAt = old.followedAt || now;
     const mergedTags = (() => {
       const oldAi = (old.tags || []).filter((t) => t.source === "ai");
       const oldHuman = (old.tags || []).filter((t) => t.source === "human");
@@ -322,7 +325,7 @@ function mergeAccounts(existing, incoming) {
       for (const t of incomingHuman) if (!out.some((x) => x.name === t.name)) out.push(t);
       return out.slice(0, MAX_TAGS_PER_ACCOUNT);
     })();
-    map.set(account.homeUrl, { ...old, ...account, tags: mergedTags });
+    map.set(account.homeUrl, { ...old, ...account, tags: mergedTags, followedAt });
   }
   return applyCategories([...map.values()]);
 }
