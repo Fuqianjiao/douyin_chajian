@@ -24,16 +24,24 @@ body {
 .shell {
   max-width: 1440px;
   margin: 0 auto;
-  padding: 28px;
+  padding: 20px 28px;
 }
 
+/* ─── 顶部操作栏：滚动时固定吸附 ─── */
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
   display: flex;
   justify-content: space-between;
-  gap: 20px;
+  gap: 16px;
   align-items: end;
   border-bottom: 1px solid var(--line);
-  padding-bottom: 22px;
+  padding: 12px 4px 14px;
+  background: var(--bg);
+  /* 滚动时微毛玻璃效果，不遮挡太多 */
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 
 h1 {
@@ -245,6 +253,9 @@ textarea {
 }
 
 .batch-bar {
+  position: sticky;
+  top: 0;
+  z-index: 49;
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto;
   gap: 14px;
@@ -252,8 +263,8 @@ textarea {
   margin: 0 0 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(24, 26, 32, .9);
-  padding: 14px;
+  background: rgba(24, 26, 32, .95);
+  padding: 12px 14px;
 }
 
 .batch-bar[hidden] {
