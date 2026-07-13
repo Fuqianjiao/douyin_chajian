@@ -862,6 +862,19 @@ chrome.runtime.onMessage.addListener((message) => {
   const added = message.added || 0;
   const progress = Math.min(95, 20 + round * 0.8);
   setStatus(`正在滚动采集：第 ${round} 次滚动，已发现 ${total} 个账号，本轮新增 ${added} 个。`, progress);
+  /* 实时更新统计卡片数字（让用户看到最新发现量） */
+  if (total > state.accounts.length) {
+    els.stats.innerHTML = `
+      <article class="stat-card">
+        <strong>${state.accounts.length}</strong>
+        <span>已保存 / <b style="color:var(--cyan)">${total}</b> 已发现</span>
+      </article>
+      <article class="stat-card">
+        <strong>${state.screenshotCount}</strong>
+        <span>已绑定截图</span>
+      </article>
+    `;
+  }
 });
 
 (async function init() {
