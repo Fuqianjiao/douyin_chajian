@@ -37,7 +37,7 @@ const MIN_TAGS_PER_ACCOUNT = 1;
 const SCREENSHOT_DB_NAME = "DouyinGalleryScreenshots";
 const SCREENSHOT_STORE = "shots";
 const SCREENSHOT_BY_URL_STORE = "shotsByUrl";
-const SCREENSHOT_DB_VERSION = 2;
+const SCREENSHOT_DB_VERSION = 3;
 
 function openScreenshotDB() {
   return new Promise((resolve, reject) => {
@@ -70,13 +70,33 @@ function requestToPromise(request) {
   });
 }
 
+function transactionDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+async function resolveScreenshotRecord(db, shot) {
+  if (!shot) return null;
+  if (shot.dataUrl) return shot;
+  if (shot.accountId && db.objectStoreNames.contains(SCREENSHOT_STORE)) {
+    const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+    const byAccount = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).get(shot.accountId));
+    if (byAccount?.dataUrl) return byAccount;
+  }
+  return null;
+}
+
 async function getScreenshotFromDB(account) {
   const db = await openScreenshotDB();
   const homeKey = profileKey(account?.homeUrl);
   if (homeKey && db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
     const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
     const shot = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).get(homeKey));
-    if (shot) return shot;
+    const resolved = await resolveScreenshotRecord(db, shot);
+    if (resolved) return resolved;
   }
   if (!account?.id) return null;
   const tx = db.transaction(SCREENSHOT_STORE, "readonly");
@@ -107,39 +127,39 @@ async function saveScreenshotToDB(account, dataUrl, capturedAt, extraUrls = []) 
         accountId: account.id,
         canonicalHomeKey: homeKey,
         homeUrl: account.homeUrl || "",
-        dataUrl,
-        capturedAt
+        capturedAt,
+        aliasOnly: true
       });
     }
   }
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  return transactionDone(tx);
 }
 
 async function countScreenshotsInDB() {
   const db = await openScreenshotDB();
-  const storeName = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE) ? SCREENSHOT_BY_URL_STORE : SCREENSHOT_STORE;
-  const tx = db.transaction(storeName, "readonly");
-  const store = tx.objectStore(storeName);
-  const request = store.count();
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function getAllScreenshotsFromDB() {
-  const db = await openScreenshotDB();
-  const storeName = db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE) ? SCREENSHOT_BY_URL_STORE : SCREENSHOT_STORE;
-  const tx = db.transaction(storeName, "readonly");
-  const store = tx.objectStore(storeName);
-  const request = store.getAll();
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+  const keys = new Set();
+  if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
+    const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
+    const request = tx.objectStore(SCREENSHOT_BY_URL_STORE).openCursor();
+    await new Promise((resolve, reject) => {
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        const shot = cursor.value;
+        const key = shot.accountId || shot.canonicalHomeKey || shot.homeKey;
+        if (key) keys.add(key);
+        cursor.continue();
+      };
+    });
+  }
+  const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+  const storeKeys = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).getAllKeys());
+  for (const key of storeKeys || []) keys.add(key);
+  return keys.size;
 }
 
 /* 轻量加载所有截图的 key 集合（只读 key，不读 base64 图片数据） */
@@ -702,11 +722,13 @@ function groupedAccounts() {
 async function galleryHtml() {
   const groups = groupedAccounts();
   const nav = [...groups.entries()].map(([name, accounts]) => `<button data-filter="${escapeHtml(name)}">${escapeHtml(name)} <b>${accounts.length}</b></button>`).join("");
-  const screenshots = await getAllScreenshotsFromDB();
   const shotMap = new Map();
-  for (const shot of screenshots) {
-    if (shot.homeKey) shotMap.set(shot.homeKey, shot);
-    if (shot.accountId) shotMap.set(shot.accountId, shot);
+  for (const account of state.accounts) {
+    const shot = await getScreenshotFromDB(account);
+    if (!shot?.dataUrl) continue;
+    shotMap.set(account.id, shot);
+    const key = profileKey(account.homeUrl);
+    if (key) shotMap.set(key, shot);
   }
   const sections = [...groups.entries()].map(([name, accounts]) => `
     <section class="folder" data-folder="${escapeHtml(name)}">

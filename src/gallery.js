@@ -1,10 +1,11 @@
 const MAX_TAGS = 6;
+const MAX_SHOT_CACHE = 60;
 
 /* ─── IndexedDB: 截图存储 ─── */
 const SCREENSHOT_DB_NAME = "DouyinGalleryScreenshots";
 const SCREENSHOT_STORE = "shots";
 const SCREENSHOT_BY_URL_STORE = "shotsByUrl";
-const SCREENSHOT_DB_VERSION = 2;
+const SCREENSHOT_DB_VERSION = 3;
 
 function openShotDB() {
   return new Promise((resolve, reject) => {
@@ -59,28 +60,53 @@ function requestToPromise(request) {
   });
 }
 
+function transactionDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function cursorEach(store, onItem) {
+  return new Promise((resolve, reject) => {
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = async () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      try {
+        await onItem(cursor.value, cursor);
+        cursor.continue();
+      } catch (error) {
+        reject(error);
+      }
+    };
+  });
+}
+
+async function resolveShotRecord(db, shot) {
+  if (!shot) return null;
+  if (shot.dataUrl) return shot;
+  if (shot.accountId && db.objectStoreNames.contains(SCREENSHOT_STORE)) {
+    const tx = db.transaction(SCREENSHOT_STORE, "readonly");
+    const byAccount = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).get(shot.accountId));
+    if (byAccount?.dataUrl) return byAccount;
+  }
+  return null;
+}
+
 async function getShotFromDB(account) {
   const db = await openShotDB();
-  const keys = shotLookupKeys(account);
   const homeKey = profileKey(account?.homeUrl);
   if (homeKey && db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
     const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
     const shot = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).get(homeKey));
-    if (shot) return shot;
-  }
-  if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
-    const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
-    const shots = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).getAll());
-    const shot = (shots || []).find((item) => {
-      const itemKeys = [
-        item.homeKey,
-        item.canonicalHomeKey,
-        item.accountId,
-        profileKey(item.homeUrl)
-      ].filter(Boolean);
-      return itemKeys.some((key) => keys.includes(key));
-    });
-    if (shot) return shot;
+    const resolved = await resolveShotRecord(db, shot);
+    if (resolved) return resolved;
   }
   if (!account?.id) return null;
   const tx = db.transaction(SCREENSHOT_STORE, "readonly");
@@ -90,15 +116,18 @@ async function getShotFromDB(account) {
 
 async function countShotsInDB() {
   const db = await openShotDB();
+  const canonicalKeys = new Set();
   if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
     const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
-    const shots = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).getAll());
-    const keys = new Set((shots || []).map((shot) => shot.canonicalHomeKey || shot.homeKey || shot.accountId).filter(Boolean));
-    return keys.size;
+    await cursorEach(tx.objectStore(SCREENSHOT_BY_URL_STORE), (shot) => {
+      const key = shot.accountId || shot.canonicalHomeKey || shot.homeKey;
+      if (key) canonicalKeys.add(key);
+    });
   }
   const tx = db.transaction(SCREENSHOT_STORE, "readonly");
   const keys = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).getAllKeys());
-  return (keys || []).length;
+  for (const key of keys || []) canonicalKeys.add(key);
+  return canonicalKeys.size;
 }
 
 async function loadShotAccountIdSet() {
@@ -106,10 +135,9 @@ async function loadShotAccountIdSet() {
   const set = new Set();
   if (db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) {
     const tx = db.transaction(SCREENSHOT_BY_URL_STORE, "readonly");
-    const shots = await requestToPromise(tx.objectStore(SCREENSHOT_BY_URL_STORE).getAll());
-    for (const shot of shots || []) {
+    await cursorEach(tx.objectStore(SCREENSHOT_BY_URL_STORE), (shot) => {
       [shot.homeKey, shot.canonicalHomeKey, shot.accountId, profileKey(shot.homeUrl)].filter(Boolean).forEach((key) => set.add(key));
-    }
+    });
   }
   const tx = db.transaction(SCREENSHOT_STORE, "readonly");
   const keys = await requestToPromise(tx.objectStore(SCREENSHOT_STORE).getAllKeys());
@@ -146,16 +174,44 @@ async function saveShotToDB(account, dataUrl, capturedAt, extraUrls = []) {
         accountId: account.id,
         canonicalHomeKey: homeKey,
         homeUrl: account.homeUrl || "",
-        dataUrl,
-        capturedAt
+        capturedAt,
+        aliasOnly: true
       });
     }
   }
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+  return transactionDone(tx);
+}
+
+async function compactShotAliases() {
+  const db = await openShotDB();
+  if (!db.objectStoreNames.contains(SCREENSHOT_BY_URL_STORE)) return 0;
+  const tx = db.transaction([SCREENSHOT_STORE, SCREENSHOT_BY_URL_STORE], "readwrite");
+  const shots = tx.objectStore(SCREENSHOT_STORE);
+  const byUrl = tx.objectStore(SCREENSHOT_BY_URL_STORE);
+  let changed = 0;
+  await cursorEach(byUrl, (shot, cursor) => {
+    if (!shot?.dataUrl) return;
+    if (shot.accountId) {
+      shots.put({
+        accountId: shot.accountId,
+        homeKey: shot.canonicalHomeKey || shot.homeKey || "",
+        homeUrl: shot.homeUrl || "",
+        dataUrl: shot.dataUrl,
+        capturedAt: shot.capturedAt
+      });
+    }
+    cursor.update({
+      homeKey: shot.homeKey,
+      accountId: shot.accountId,
+      canonicalHomeKey: shot.canonicalHomeKey || shot.homeKey || "",
+      homeUrl: shot.homeUrl || "",
+      capturedAt: shot.capturedAt,
+      aliasOnly: true
+    });
+    changed++;
   });
+  await transactionDone(tx);
+  return changed;
 }
 
 function waitForTabComplete(tabId, timeoutMs = 10000) {
@@ -413,6 +469,16 @@ function shotFor(accountId) {
   return state.shotCache.get(accountId) || "";
 }
 
+function setShotCache(accountId, dataUrl) {
+  if (!accountId || !dataUrl) return;
+  if (state.shotCache.has(accountId)) state.shotCache.delete(accountId);
+  state.shotCache.set(accountId, dataUrl);
+  while (state.shotCache.size > MAX_SHOT_CACHE) {
+    const oldestKey = state.shotCache.keys().next().value;
+    state.shotCache.delete(oldestKey);
+  }
+}
+
 function hasShotForAccount(account) {
   const key = shotKeyForAccount(account);
   return Boolean(key && state.shotAccountIdSet.has(key)) || Boolean(account?.id && state.shotAccountIdSet.has(account.id));
@@ -436,7 +502,7 @@ function lazyLoadShots() {
       // 从 IndexedDB 加载截图
       getShotFromDB(account).then((shot) => {
         if (shot?.dataUrl) {
-          state.shotCache.set(account.id, shot.dataUrl);
+          setShotCache(account.id, shot.dataUrl);
           const parent = placeholder.closest(".shot");
           if (parent) {
             const img = document.createElement("img");
@@ -1253,8 +1319,8 @@ function bindEvents() {
         }
         for (const key of shotLookupKeys(account, bindUrls)) state.shotAccountIdSet.add(key);
         for (const key of shotLookupKeys(bindingAccount, bindUrls)) state.shotAccountIdSet.add(key);
-        state.shotCache.set(account.id, verifiedShot.dataUrl);
-        state.shotCache.set(bindingAccount.id, verifiedShot.dataUrl);
+        setShotCache(account.id, verifiedShot.dataUrl);
+        setShotCache(bindingAccount.id, verifiedShot.dataUrl);
 
         // 6. 同步 signature 到备注
         if (profile.profileDetail) {
@@ -1576,6 +1642,10 @@ function toChinese(name) {
   });
   if (originalAccountsJson !== JSON.stringify(state.accounts) || needsSave) {
     await chrome.storage.local.set({ accounts: state.accounts });
+  }
+  const compactedShots = await compactShotAliases();
+  if (compactedShots > 0) {
+    addLog(`已压缩 ${compactedShots} 条重复截图索引，降低画廊内存占用`, "success");
   }
   // 加载截图 accountId 列表（轻量，只读 key 不读图片数据）
   await loadShotAccountIdSet();
